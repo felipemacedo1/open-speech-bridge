@@ -1,0 +1,25 @@
+[package]
+name = "osb-pipewire"
+description = "PipeWire audio backend for OpenSpeechBridge (Linux only)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+osb-core.workspace = true
+osb-audio.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+pipewire.workspace = true
+libspa.workspace = true
+
+[dependencies]
+osb-core.workspace = true
+osb-audio.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }

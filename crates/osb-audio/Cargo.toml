@@ -1,0 +1,23 @@
+[package]
+name = "osb-audio"
+description = "Audio buffer management and processing for OpenSpeechBridge"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+osb-core.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+ringbuf.workspace = true
+rubato.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "buffer_bench"
+harness = false

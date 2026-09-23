@@ -1,0 +1,24 @@
+[package]
+name = "osb-daemon"
+description = "Background daemon for OpenSpeechBridge runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+osb-core.workspace = true
+osb-audio.workspace = true
+osb-pipewire.workspace = true
+osb-protocol.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "test-util"] }

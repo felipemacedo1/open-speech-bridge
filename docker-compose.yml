@@ -1,0 +1,83 @@
+# OpenSpeechBridge Development Environment
+#
+# Usage:
+#   docker-compose up -d      # Start development container
+#   docker-compose exec dev bash  # Enter the container
+#   docker-compose down       # Stop and remove container
+#
+# For proxy configuration, copy .env.example to .env and configure.
+
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+      args:
+        - HTTP_PROXY=${HTTP_PROXY:-}
+        - HTTPS_PROXY=${HTTPS_PROXY:-}
+        - NO_PROXY=${NO_PROXY:-}
+    image: openspeechbridge-dev:latest
+    container_name: osb-dev
+    
+    # Keep container running
+    stdin_open: true
+    tty: true
+    
+    # Mount source code
+    volumes:
+      - .:/workspace:cached
+      # Persist cargo cache for faster builds
+      - cargo-registry:/home/developer/.cargo/registry
+      - cargo-git:/home/developer/.cargo/git
+      - cargo-target:/workspace/target
+    
+    # Environment variables
+    environment:
+      - RUST_BACKTRACE=1
+      - RUST_LOG=info
+      - CARGO_INCREMENTAL=1
+      # Proxy (inherited from .env or host)
+      - HTTP_PROXY=${HTTP_PROXY:-}
+      - HTTPS_PROXY=${HTTPS_PROXY:-}
+      - NO_PROXY=${NO_PROXY:-}
+      - http_proxy=${HTTP_PROXY:-}
+      - https_proxy=${HTTPS_PROXY:-}
+      - no_proxy=${NO_PROXY:-}
+    
+    # Working directory
+    working_dir: /workspace
+    
+    # Network mode for potential audio device access in future
+    # Note: PipeWire integration will need additional configuration
+    network_mode: bridge
+    
+    # Resource limits (adjust as needed)
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+        reservations:
+          memory: 2G
+
+  # CI testing service
+  ci:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: ci
+      args:
+        - HTTP_PROXY=${HTTP_PROXY:-}
+        - HTTPS_PROXY=${HTTPS_PROXY:-}
+        - NO_PROXY=${NO_PROXY:-}
+    image: openspeechbridge-ci:latest
+    profiles:
+      - ci
+
+volumes:
+  cargo-registry:
+    name: osb-cargo-registry
+  cargo-git:
+    name: osb-cargo-git
+  cargo-target:
+    name: osb-cargo-target

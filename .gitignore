@@ -1,0 +1,77 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# IDE and editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment and secrets (keep .env.example)
+.env
+.env.local
+!.env.example
+.env.*.local
+*.pem
+*.key
+
+# Python (for engine components)
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+venv/
+.venv/
+env/
+.eggs/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+
+# ML models (do not commit large binaries)
+models/
+*.onnx
+*.bin
+*.pt
+*.pth
+*.gguf
+*.ggml
+
+# Audio test files (large)
+*.wav
+*.mp3
+*.flac
+*.ogg
+!fixtures/**/*.wav
+
+# Build artifacts
+*.so
+*.dylib
+*.dll
+
+# Coverage and profiling
+coverage/
+*.profraw
+*.profdata
+lcov.info
+tarpaulin-report.html
+
+# Benchmarks output
+criterion/
+
+# Documentation build
+/docs/_site/
+
+# OS files
+Thumbs.db
+.Spotlight-V100
+.Trashes
+
+# Temporary files
+*.tmp
+*.temp
+*.log
