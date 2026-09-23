@@ -3,11 +3,11 @@
 //! Virtual devices allow OpenSpeechBridge to inject audio into applications
 //! (virtual microphone) or capture audio from applications (virtual sink).
 
-use crate::context::PipeWireContext;
-use crate::error::{PipeWireError, Result};
+use super::context::PipeWireContext;
+use crate::error::Result;
 use osb_audio::buffer::{AudioRingBuffer, AudioRingConsumer, AudioRingProducer};
 use osb_core::audio::{AudioFormat, ChannelLayout, SampleFormat, SampleRate};
-use tracing::{debug, info, warn};
+use tracing::info;
 
 /// A virtual microphone that appears as an audio input device.
 ///

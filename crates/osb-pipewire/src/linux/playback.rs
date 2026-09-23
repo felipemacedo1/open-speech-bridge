@@ -1,10 +1,10 @@
 //! Audio playback stream implementation.
 
-use crate::context::PipeWireContext;
-use crate::error::{PipeWireError, Result};
+use super::context::PipeWireContext;
+use crate::error::Result;
 use osb_audio::buffer::{AudioRingBuffer, AudioRingConsumer};
 use osb_core::audio::{AudioFormat, ChannelLayout, SampleFormat, SampleRate};
-use tracing::{debug, info};
+use tracing::info;
 
 /// Audio playback stream for outputting to a device.
 pub struct PlaybackStream {

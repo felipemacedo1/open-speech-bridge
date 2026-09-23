@@ -1,20 +1,13 @@
 //! Audio capture stream implementation.
 
-use crate::context::PipeWireContext;
-use crate::error::{PipeWireError, Result};
+use super::context::PipeWireContext;
+use crate::error::Result;
 use osb_audio::buffer::{AudioRingBuffer, AudioRingProducer};
 use osb_core::audio::{AudioFormat, ChannelLayout, SampleFormat, SampleRate};
-use osb_core::metrics::AudioMetrics;
-use pipewire as pw;
-use pipewire::spa::param::audio::{AudioFormat as SpaAudioFormat, AudioInfoRaw};
-use pipewire::spa::pod::Pod;
-use pipewire::stream::{Stream, StreamFlags};
-use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::info;
 
 /// Audio capture stream for recording from a device.
 pub struct CaptureStream {
-    stream: Option<Stream>,
     producer: AudioRingProducer,
     format: AudioFormat,
     device_id: String,
@@ -43,7 +36,6 @@ impl CaptureStream {
         let (producer, consumer) = AudioRingBuffer::new(buffer_frames, format.channels.channels());
 
         let stream = Self {
-            stream: None,
             producer,
             format,
             device_id: device_id.to_string(),

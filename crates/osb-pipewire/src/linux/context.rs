@@ -3,10 +3,7 @@
 use crate::device::{AudioDevice, AudioEnvironment, DeviceType};
 use crate::error::{PipeWireError, Result};
 use pipewire as pw;
-use std::cell::RefCell;
-use std::rc::Rc;
-use std::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// PipeWire context for audio operations.
 pub struct PipeWireContext {
@@ -22,7 +19,8 @@ impl PipeWireContext {
         // Initialize PipeWire
         pw::init();
         
-        let version = pw::library_version().to_string();
+        // Get version from pipewire command
+        let version = get_pipewire_version().unwrap_or_else(|| "unknown".to_string());
         info!(version = %version, "initialized PipeWire");
 
         // Create main loop
@@ -177,6 +175,24 @@ fn extract_property_value(line: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Get PipeWire version from the pipewire command.
+fn get_pipewire_version() -> Option<String> {
+    std::process::Command::new("pipewire")
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            String::from_utf8(o.stdout).ok().and_then(|s| {
+                // Parse "pipewire X.Y.Z" or similar
+                s.lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().last())
+                    .map(|v| v.to_string())
+            })
+        })
 }
 
 #[cfg(test)]

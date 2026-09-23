@@ -3,7 +3,7 @@
 # This Dockerfile creates a development environment with all dependencies
 # for building and testing OpenSpeechBridge on Linux.
 
-FROM rust:1.82-bookworm AS base
+FROM rust:1.87-bookworm AS base
 
 # Build arguments for proxy (passed at build time)
 ARG HTTP_PROXY
@@ -29,6 +29,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     pkg-config \
     cmake \
+    # Clang/LLVM for bindgen
+    llvm-dev \
+    libclang-dev \
+    clang \
     # Debugging and utilities
     gdb \
     valgrind \
@@ -45,10 +49,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Rust components
-RUN rustup component add rustfmt clippy rust-src rust-analyzer
+RUN rustup component add rustfmt clippy
 
-# Install cargo tools
-RUN cargo install cargo-watch cargo-expand cargo-deny cargo-audit
+# Install cargo tools (optional - continue if some fail)
+RUN cargo install cargo-watch || true
+RUN cargo install cargo-audit || true
 
 # Create non-root user for development
 RUN useradd -m -s /bin/bash developer

@@ -6,7 +6,7 @@
 
 use osb_core::metrics::{AudioMetrics, BufferOccupancy};
 use ringbuf::{
-    traits::{Consumer, Producer, Split},
+    traits::{Consumer, Observer, Producer, Split},
     HeapRb,
 };
 use std::sync::Arc;
