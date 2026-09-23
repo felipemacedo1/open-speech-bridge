@@ -87,6 +87,8 @@ Before making architectural changes, read:
 5. `docs/ROADMAP.md`
 6. `docs/LICENSING.md`
 7. `docs/adr/` (all ADRs)
+8. `.kiro/steering/01-memory-bank.md` (Active session state & Memory Bank)
+9. `GEMINI.md` / `.agents/rules/` (AGY System directives)
 
 ## Development Commands
 

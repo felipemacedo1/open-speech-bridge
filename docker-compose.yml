@@ -6,6 +6,7 @@
 #   docker-compose down       # Stop and remove container
 #
 # For proxy configuration, copy .env.example to .env and configure.
+name: open-speech-bridge
 
 services:
   dev:

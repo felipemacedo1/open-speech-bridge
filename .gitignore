@@ -11,6 +11,9 @@ Cargo.lock
 *~
 .DS_Store
 
+# Local agent steering and memory bank
+.kiro/
+
 # Environment and secrets (keep .env.example)
 .env
 .env.local
