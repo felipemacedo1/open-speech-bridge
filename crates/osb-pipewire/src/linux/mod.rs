@@ -2,17 +2,16 @@
 //!
 //! This module provides the actual PipeWire integration for Linux systems.
 
-mod context;
 mod capture;
+mod context;
 mod playback;
 mod virtual_device;
 
-pub use context::PipeWireContext;
 pub use capture::{CaptureStream, CaptureStreamBuilder};
+pub use context::PipeWireContext;
 pub use playback::{PlaybackStream, PlaybackStreamBuilder};
 pub use virtual_device::{
-    VirtualMicrophone, VirtualSink,
-    DEFAULT_VIRTUAL_MIC_NAME, DEFAULT_VIRTUAL_SINK_NAME,
+    VirtualMicrophone, VirtualSink, DEFAULT_VIRTUAL_MIC_NAME, DEFAULT_VIRTUAL_SINK_NAME,
 };
 
 use std::process::Command;
@@ -31,7 +30,7 @@ pub fn is_available() -> bool {
 /// Get diagnostic information about PipeWire.
 pub fn diagnose() -> String {
     let mut info = String::new();
-    
+
     // Check PipeWire version
     if let Ok(output) = Command::new("pipewire").arg("--version").output() {
         if output.status.success() {

@@ -114,11 +114,7 @@ impl Resampler {
     /// # Returns
     ///
     /// Number of output frames produced.
-    pub fn process(
-        &mut self,
-        input: &[Vec<f32>],
-        output: &mut [Vec<f32>],
-    ) -> Result<usize> {
+    pub fn process(&mut self, input: &[Vec<f32>], output: &mut [Vec<f32>]) -> Result<usize> {
         let (_, frames) = self
             .inner
             .process_into_buffer(input, output, None)
@@ -150,9 +146,8 @@ impl Resampler {
 
         // Prepare output buffers
         let out_frames = self.output_frames();
-        let mut output_channels: Vec<Vec<f32>> = (0..self.channels)
-            .map(|_| vec![0.0; out_frames])
-            .collect();
+        let mut output_channels: Vec<Vec<f32>> =
+            (0..self.channels).map(|_| vec![0.0; out_frames]).collect();
 
         // Process
         let produced = self.process(&input_channels, &mut output_channels)?;
@@ -182,7 +177,11 @@ pub fn resample_ratio(input_rate: SampleRate, output_rate: SampleRate) -> f64 {
 
 /// Calculate the number of output frames for a given number of input frames.
 #[inline]
-pub fn output_frame_count(input_frames: usize, input_rate: SampleRate, output_rate: SampleRate) -> usize {
+pub fn output_frame_count(
+    input_frames: usize,
+    input_rate: SampleRate,
+    output_rate: SampleRate,
+) -> usize {
     let ratio = resample_ratio(input_rate, output_rate);
     (input_frames as f64 * ratio).ceil() as usize
 }
@@ -206,34 +205,21 @@ mod tests {
 
     #[test]
     fn test_resampler_creation() {
-        let resampler = Resampler::new(
-            SampleRate::PRO_48K,
-            SampleRate::SPEECH_16K,
-            1,
-            1024,
-        );
+        let resampler = Resampler::new(SampleRate::PRO_48K, SampleRate::SPEECH_16K, 1, 1024);
         assert!(resampler.is_ok());
     }
 
     #[test]
     fn test_resampler_process() {
-        let mut resampler = Resampler::new(
-            SampleRate::PRO_48K,
-            SampleRate::SPEECH_16K,
-            1,
-            1024,
-        )
-        .unwrap();
+        let mut resampler =
+            Resampler::new(SampleRate::PRO_48K, SampleRate::SPEECH_16K, 1, 1024).unwrap();
 
         let input_frames = resampler.input_frames_required();
         let output_frames = resampler.output_frames();
 
         // Create test input (sine wave)
-        let input: Vec<Vec<f32>> = vec![
-            (0..input_frames)
-                .map(|i| (i as f32 * 0.01).sin())
-                .collect()
-        ];
+        let input: Vec<Vec<f32>> =
+            vec![(0..input_frames).map(|i| (i as f32 * 0.01).sin()).collect()];
 
         let mut output: Vec<Vec<f32>> = vec![vec![0.0; output_frames]];
 

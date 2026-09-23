@@ -22,24 +22,22 @@ impl AudioManager {
         #[cfg(target_os = "linux")]
         {
             use osb_pipewire::PipeWireContext;
-            
+
             match PipeWireContext::new() {
-                Ok(ctx) => {
-                    match ctx.get_environment() {
-                        Ok(env) => {
-                            info!(
-                                pipewire_version = ?env.pipewire_version,
-                                inputs = env.input_devices.len(),
-                                outputs = env.output_devices.len(),
-                                "audio environment discovered"
-                            );
-                            self.environment = Some(env);
-                        }
-                        Err(e) => {
-                            tracing::warn!("failed to get audio environment: {}", e);
-                        }
+                Ok(ctx) => match ctx.get_environment() {
+                    Ok(env) => {
+                        info!(
+                            pipewire_version = ?env.pipewire_version,
+                            inputs = env.input_devices.len(),
+                            outputs = env.output_devices.len(),
+                            "audio environment discovered"
+                        );
+                        self.environment = Some(env);
                     }
-                }
+                    Err(e) => {
+                        tracing::warn!("failed to get audio environment: {}", e);
+                    }
+                },
                 Err(e) => {
                     tracing::warn!("failed to initialize PipeWire: {}", e);
                 }

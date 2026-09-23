@@ -82,7 +82,11 @@ fn collect_platform_info() -> PlatformInfo {
                 content
                     .lines()
                     .find(|l| l.starts_with("PRETTY_NAME="))
-                    .map(|l| l.trim_start_matches("PRETTY_NAME=").trim_matches('"').to_string())
+                    .map(|l| {
+                        l.trim_start_matches("PRETTY_NAME=")
+                            .trim_matches('"')
+                            .to_string()
+                    })
             })
     } else {
         None
@@ -141,7 +145,10 @@ fn generate_recommendations(platform: &PlatformInfo, pipewire: &PipeWireInfo) ->
     let mut recs = Vec::new();
 
     if platform.os != "linux" {
-        recs.push("OpenSpeechBridge currently only supports Linux. Windows/macOS support is planned.".to_string());
+        recs.push(
+            "OpenSpeechBridge currently only supports Linux. Windows/macOS support is planned."
+                .to_string(),
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -149,11 +156,17 @@ fn generate_recommendations(platform: &PlatformInfo, pipewire: &PipeWireInfo) ->
         if !pipewire.available {
             recs.push("PipeWire is not installed. Install it with: sudo apt install pipewire pipewire-audio-client-libraries".to_string());
         } else if !pipewire.daemon_running {
-            recs.push("PipeWire daemon is not running. Start it with: systemctl --user start pipewire".to_string());
+            recs.push(
+                "PipeWire daemon is not running. Start it with: systemctl --user start pipewire"
+                    .to_string(),
+            );
         }
 
         if !pipewire.wireplumber_running {
-            recs.push("WirePlumber is not running. Install/start it for better device management.".to_string());
+            recs.push(
+                "WirePlumber is not running. Install/start it for better device management."
+                    .to_string(),
+            );
         }
     }
 
@@ -188,7 +201,10 @@ fn print_report(report: &DiagnosticReport) {
         println!("  Version:      {}", version);
     }
     println!("  Daemon:       {}", status(report.pipewire.daemon_running));
-    println!("  WirePlumber:  {}", status(report.pipewire.wireplumber_running));
+    println!(
+        "  WirePlumber:  {}",
+        status(report.pipewire.wireplumber_running)
+    );
     println!();
 
     println!("OpenSpeechBridge:");

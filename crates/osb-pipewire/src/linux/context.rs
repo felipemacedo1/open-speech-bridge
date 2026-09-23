@@ -18,7 +18,7 @@ impl PipeWireContext {
     pub fn new() -> Result<Self> {
         // Initialize PipeWire
         pw::init();
-        
+
         // Get version from pipewire command
         let version = get_pipewire_version().unwrap_or_else(|| "unknown".to_string());
         info!(version = %version, "initialized PipeWire");
@@ -55,7 +55,7 @@ impl PipeWireContext {
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let devices = parse_pw_cli_output(&stdout, device_type);
-        
+
         debug!(count = devices.len(), ?device_type, "enumerated devices");
         Ok(devices)
     }
@@ -100,17 +100,13 @@ fn parse_pw_cli_output(output: &str, device_type: DeviceType) -> Vec<AudioDevice
 
     for line in output.lines() {
         let line = line.trim();
-        
+
         // New object starts with "id X, type ..."
         if line.starts_with("id ") {
             // Save previous device if valid
             if let (Some(id), Some(name)) = (current_id.take(), current_name.take()) {
                 if is_target_class {
-                    let mut device = AudioDevice::new(
-                        id.to_string(),
-                        name,
-                        device_type,
-                    );
+                    let mut device = AudioDevice::new(id.to_string(), name, device_type);
                     if let Some(desc) = current_desc.take() {
                         device = device.with_description(desc);
                     }
@@ -118,7 +114,7 @@ fn parse_pw_cli_output(output: &str, device_type: DeviceType) -> Vec<AudioDevice
                     devices.push(device);
                 }
             }
-            
+
             // Parse new ID
             if let Some(id_str) = line.split(',').next() {
                 if let Some(id) = id_str.strip_prefix("id ") {
@@ -128,19 +124,19 @@ fn parse_pw_cli_output(output: &str, device_type: DeviceType) -> Vec<AudioDevice
             is_target_class = false;
             current_desc = None;
         }
-        
+
         // Look for media.class property
         if line.contains("media.class") && line.contains(target_class) {
             is_target_class = true;
         }
-        
+
         // Look for node.name
         if line.contains("node.name") {
             if let Some(name) = extract_property_value(line) {
                 current_name = Some(name);
             }
         }
-        
+
         // Look for node.description
         if line.contains("node.description") {
             if let Some(desc) = extract_property_value(line) {

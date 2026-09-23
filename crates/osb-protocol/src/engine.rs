@@ -240,8 +240,7 @@ mod tests {
     #[test]
     fn test_engine_info_builder() {
         let mut caps = CapabilitySet::new();
-        caps.add(Capability::StreamingStt)
-            .add(Capability::Gpu);
+        caps.add(Capability::StreamingStt).add(Capability::Gpu);
 
         let info = EngineInfo::builder("whisper-cpp")
             .name("Whisper.cpp")

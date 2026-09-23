@@ -19,7 +19,11 @@ pub fn run(json_output: bool) -> Result<()> {
         version: env!("CARGO_PKG_VERSION"),
         target: env!("TARGET"),
         rustc: env!("RUSTC_VERSION"),
-        profile: if cfg!(debug_assertions) { "debug" } else { "release" },
+        profile: if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        },
         features: vec![],
     };
 

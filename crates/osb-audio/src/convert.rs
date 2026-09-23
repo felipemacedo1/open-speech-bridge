@@ -83,7 +83,7 @@ impl SampleConverter {
 pub trait ConvertSamples {
     /// Convert samples in place from one format to another.
     fn convert_format(&mut self, from: SampleFormat, to: SampleFormat);
-    
+
     /// Convert channel layout in place.
     fn convert_channels(&mut self, from: ChannelLayout, to: ChannelLayout);
 }
@@ -123,7 +123,7 @@ pub fn interleave(channels: &[&[f32]], output: &mut [f32]) {
     if num_channels == 0 {
         return;
     }
-    
+
     let frames = channels[0].len();
     for frame in 0..frames {
         for (ch, channel) in channels.iter().enumerate() {
@@ -140,13 +140,13 @@ pub fn deinterleave(input: &[f32], num_channels: usize, outputs: &mut [Vec<f32>]
     if num_channels == 0 || outputs.len() < num_channels {
         return;
     }
-    
+
     let frames = input.len() / num_channels;
     for output in outputs.iter_mut().take(num_channels) {
         output.clear();
         output.reserve(frames);
     }
-    
+
     for (i, &sample) in input.iter().enumerate() {
         let ch = i % num_channels;
         outputs[ch].push(sample);

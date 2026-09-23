@@ -70,7 +70,8 @@ pub async fn run(json_output: bool) -> Result<()> {
                     commercial_use: e.commercial_use,
                 })
                 .collect(),
-            note: "No ML engines installed. See docs/ENGINE_PROTOCOL.md for integration.".to_string(),
+            note: "No ML engines installed. See docs/ENGINE_PROTOCOL.md for integration."
+                .to_string(),
         };
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
@@ -88,7 +89,10 @@ pub async fn run(json_output: bool) -> Result<()> {
             println!("  {} ({})", engine.name, engine.id);
             println!("    Version:    {}", engine.version);
             println!("    Type:       {}", engine.engine_type);
-            println!("    License:    {}", engine.license.as_deref().unwrap_or("unknown"));
+            println!(
+                "    License:    {}",
+                engine.license.as_deref().unwrap_or("unknown")
+            );
             println!("    Commercial: {}", commercial);
             println!();
         }

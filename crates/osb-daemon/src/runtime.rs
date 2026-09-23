@@ -58,7 +58,7 @@ impl Runtime {
     /// Create a new runtime with the given configuration.
     pub fn new(config: RuntimeConfig) -> Self {
         let (shutdown_tx, _) = broadcast::channel(1);
-        
+
         Self {
             config,
             state: Arc::new(RwLock::new(RuntimeState::Stopped)),
@@ -174,18 +174,18 @@ mod tests {
     #[tokio::test]
     async fn test_runtime_lifecycle() {
         let runtime = Runtime::with_defaults();
-        
+
         assert_eq!(runtime.state().await, RuntimeState::Stopped);
-        
+
         runtime.start().await.unwrap();
         assert_eq!(runtime.state().await, RuntimeState::Running);
-        
+
         runtime.pause().await.unwrap();
         assert_eq!(runtime.state().await, RuntimeState::Paused);
-        
+
         runtime.resume().await.unwrap();
         assert_eq!(runtime.state().await, RuntimeState::Running);
-        
+
         runtime.stop().await.unwrap();
         assert_eq!(runtime.state().await, RuntimeState::Stopped);
     }

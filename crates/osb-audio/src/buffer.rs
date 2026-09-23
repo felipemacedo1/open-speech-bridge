@@ -173,14 +173,14 @@ impl AudioRingProducer {
     /// Note: This is NOT real-time safe. Use only in non-real-time contexts.
     pub fn push_blocking(&mut self, samples: &[f32], timeout_ms: u64) -> usize {
         use std::time::{Duration, Instant};
-        
+
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
         let mut total_written = 0;
 
         while total_written < samples.len() && Instant::now() < deadline {
             let written = self.inner.push_slice(&samples[total_written..]);
             total_written += written;
-            
+
             if written == 0 {
                 std::thread::sleep(Duration::from_micros(100));
             }

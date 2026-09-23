@@ -127,12 +127,12 @@ mod tests {
     #[test]
     fn test_pipeline_lifecycle() {
         let mut pipeline = Pipeline::default();
-        
+
         assert!(!pipeline.is_running());
-        
+
         pipeline.start().unwrap();
         assert!(pipeline.is_running());
-        
+
         pipeline.stop().unwrap();
         assert!(!pipeline.is_running());
     }

@@ -146,17 +146,23 @@ impl CapabilitySet {
 
     /// Check if a language pair is supported for translation.
     pub fn supports_translation(&self, source: &str, target: &str) -> bool {
-        self.language_pairs.iter().any(|p| p.source == source && p.target == target)
+        self.language_pairs
+            .iter()
+            .any(|p| p.source == source && p.target == target)
     }
 
     /// Check if a language is supported for STT.
     pub fn supports_stt_language(&self, lang: &str) -> bool {
-        self.stt_languages.iter().any(|l| l == lang || l.starts_with(&format!("{}-", lang.split('-').next().unwrap_or(lang))))
+        self.stt_languages.iter().any(|l| {
+            l == lang || l.starts_with(&format!("{}-", lang.split('-').next().unwrap_or(lang)))
+        })
     }
 
     /// Check if a language is supported for TTS.
     pub fn supports_tts_language(&self, lang: &str) -> bool {
-        self.tts_languages.iter().any(|l| l == lang || l.starts_with(&format!("{}-", lang.split('-').next().unwrap_or(lang))))
+        self.tts_languages.iter().any(|l| {
+            l == lang || l.starts_with(&format!("{}-", lang.split('-').next().unwrap_or(lang)))
+        })
     }
 
     /// Get all capabilities.
@@ -239,8 +245,7 @@ mod tests {
     #[test]
     fn test_has_all_has_any() {
         let mut caps = CapabilitySet::new();
-        caps.add(Capability::Stt)
-            .add(Capability::Tts);
+        caps.add(Capability::Stt).add(Capability::Tts);
 
         assert!(caps.has_all(&[Capability::Stt, Capability::Tts]));
         assert!(!caps.has_all(&[Capability::Stt, Capability::Gpu]));

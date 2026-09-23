@@ -240,7 +240,7 @@ mod tests {
     #[test]
     fn test_latency_tracker() {
         let mut tracker = LatencyTracker::new(100);
-        
+
         for _ in 0..10 {
             tracker.start();
             std::thread::sleep(std::time::Duration::from_micros(100));

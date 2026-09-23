@@ -26,7 +26,7 @@ impl EngineSupervisor {
     pub fn register(&mut self, info: EngineInfo) {
         let id = info.id.clone();
         info!(engine_id = %id, name = %info.name, "registering engine");
-        
+
         self.engines.insert(
             id,
             EngineEntry {
@@ -54,14 +54,14 @@ impl EngineSupervisor {
     /// Start an engine.
     pub fn start_engine(&mut self, id: &EngineId) -> Result<(), String> {
         let entry = self.engines.get_mut(id).ok_or("engine not found")?;
-        
+
         if entry.state != EngineState::Stopped {
             return Err("engine is not stopped".to_string());
         }
 
         info!(engine_id = %id, "starting engine");
         entry.state = EngineState::Starting;
-        
+
         // In a real implementation, we would:
         // 1. Spawn the engine process (if external)
         // 2. Send initialization message
@@ -75,10 +75,10 @@ impl EngineSupervisor {
     /// Stop an engine.
     pub fn stop_engine(&mut self, id: &EngineId) -> Result<(), String> {
         let entry = self.engines.get_mut(id).ok_or("engine not found")?;
-        
+
         info!(engine_id = %id, "stopping engine");
         entry.state = EngineState::ShuttingDown;
-        
+
         // Graceful shutdown
 
         entry.state = EngineState::Stopped;
@@ -121,19 +121,19 @@ mod tests {
     #[test]
     fn test_engine_registration() {
         let mut supervisor = EngineSupervisor::new();
-        
+
         let mut caps = CapabilitySet::new();
         caps.add(Capability::StreamingStt);
-        
+
         let info = EngineInfo::builder("test-engine")
             .name("Test Engine")
             .version("1.0.0")
             .engine_type(EngineType::Mock)
             .capabilities(caps)
             .build();
-        
+
         supervisor.register(info);
-        
+
         assert!(supervisor.get_info(&EngineId::new("test-engine")).is_some());
         assert_eq!(
             supervisor.get_state(&EngineId::new("test-engine")),
@@ -144,19 +144,17 @@ mod tests {
     #[test]
     fn test_engine_lifecycle() {
         let mut supervisor = EngineSupervisor::new();
-        
-        let info = EngineInfo::builder("test")
-            .name("Test")
-            .build();
-        
+
+        let info = EngineInfo::builder("test").name("Test").build();
+
         supervisor.register(info);
         let id = EngineId::new("test");
-        
+
         assert_eq!(supervisor.get_state(&id), Some(EngineState::Stopped));
-        
+
         supervisor.start_engine(&id).unwrap();
         assert_eq!(supervisor.get_state(&id), Some(EngineState::Ready));
-        
+
         supervisor.stop_engine(&id).unwrap();
         assert_eq!(supervisor.get_state(&id), Some(EngineState::Stopped));
     }

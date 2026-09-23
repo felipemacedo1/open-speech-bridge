@@ -96,7 +96,10 @@ pub enum EngineError {
 
     /// Capability not supported
     #[error("capability not supported: {capability} by engine {engine_id}")]
-    CapabilityNotSupported { engine_id: String, capability: String },
+    CapabilityNotSupported {
+        engine_id: String,
+        capability: String,
+    },
 
     /// Model loading error
     #[error("model error: {0}")]
@@ -165,7 +168,9 @@ impl AudioError {
             Self::BufferOverflow { .. } | Self::BufferUnderrun { .. } => ErrorSeverity::Transient,
             Self::DeviceNotFound { .. } | Self::FormatNotSupported(_) => ErrorSeverity::Warning,
             Self::DeviceAccessDenied { .. } => ErrorSeverity::Critical,
-            Self::PipeWire(_) | Self::Stream(_) | Self::ResamplingError(_) => ErrorSeverity::Warning,
+            Self::PipeWire(_) | Self::Stream(_) | Self::ResamplingError(_) => {
+                ErrorSeverity::Warning
+            }
         }
     }
 }
