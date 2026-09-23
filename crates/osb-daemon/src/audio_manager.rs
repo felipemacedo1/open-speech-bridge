@@ -1,8 +1,8 @@
 //! Audio device and stream management.
 
 use osb_core::error::Result;
-use osb_pipewire::device::{AudioDevice, AudioEnvironment, DeviceType};
-use tracing::{debug, info};
+use osb_pipewire::device::{AudioDevice, AudioEnvironment};
+use tracing::info;
 
 /// Manages audio devices and streams.
 pub struct AudioManager {

@@ -2,7 +2,6 @@
 
 use anyhow::Result;
 use osb_daemon::audio_manager::AudioManager;
-use osb_pipewire::device::DeviceType;
 use serde::Serialize;
 
 #[derive(Serialize)]

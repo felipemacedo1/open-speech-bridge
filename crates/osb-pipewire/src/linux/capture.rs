@@ -23,7 +23,7 @@ impl CaptureStream {
     /// * `device_id` - Device identifier (node ID or name)
     /// * `buffer_frames` - Size of the ring buffer in frames
     pub fn new(
-        ctx: &PipeWireContext,
+        _ctx: &PipeWireContext,
         device_id: &str,
         buffer_frames: u32,
     ) -> Result<(Self, osb_audio::buffer::AudioRingConsumer)> {

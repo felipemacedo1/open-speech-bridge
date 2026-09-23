@@ -7,7 +7,7 @@ use crate::audio::{AudioFormat, ChannelLayout, SampleFormat, SampleRate};
 use serde::{Deserialize, Serialize};
 
 /// Main configuration structure.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     /// Audio subsystem configuration
@@ -18,17 +18,6 @@ pub struct Config {
     pub logging: LoggingConfig,
     /// Metrics configuration
     pub metrics: MetricsConfig,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            audio: AudioConfig::default(),
-            engine: EngineConfig::default(),
-            logging: LoggingConfig::default(),
-            metrics: MetricsConfig::default(),
-        }
-    }
 }
 
 /// Audio subsystem configuration.

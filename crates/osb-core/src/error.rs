@@ -6,7 +6,6 @@
 //! - Recoverable where possible
 //! - Suitable for both human display and programmatic handling
 
-use std::fmt;
 use thiserror::Error;
 
 /// Result type alias using the crate's error type.

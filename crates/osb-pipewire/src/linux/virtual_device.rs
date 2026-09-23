@@ -36,7 +36,7 @@ impl VirtualMicrophone {
     /// A tuple of (virtual mic, producer). Write translated audio to the
     /// producer, and applications will receive it from the virtual mic.
     pub fn new(
-        ctx: &PipeWireContext,
+        _ctx: &PipeWireContext,
         name: &str,
         buffer_frames: u32,
     ) -> Result<(Self, AudioRingProducer)> {
@@ -157,7 +157,7 @@ impl VirtualSink {
     /// A tuple of (sink, consumer). Audio from applications will be
     /// available from the consumer for processing.
     pub fn new(
-        ctx: &PipeWireContext,
+        _ctx: &PipeWireContext,
         name: &str,
         buffer_frames: u32,
     ) -> Result<(Self, AudioRingConsumer)> {

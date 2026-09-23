@@ -92,7 +92,7 @@ impl ConvertSamples for Vec<f32> {
     fn convert_format(&mut self, from: SampleFormat, to: SampleFormat) {
         // f32 to f32 is a no-op
         if from == to || (from == SampleFormat::F32 && to == SampleFormat::F32) {
-            return;
+            // No conversion needed
         }
         // For other conversions, we'd need type changes which Vec<f32> can't do in place
         // This is primarily for documentation; actual cross-type conversion needs separate buffers

@@ -28,7 +28,7 @@ impl PlaybackStream {
     /// A tuple of (stream, producer). Write samples to the producer,
     /// and the stream will play them.
     pub fn new(
-        ctx: &PipeWireContext,
+        _ctx: &PipeWireContext,
         device_id: &str,
         buffer_frames: u32,
     ) -> Result<(Self, osb_audio::buffer::AudioRingProducer)> {

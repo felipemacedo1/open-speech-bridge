@@ -110,7 +110,7 @@ pub struct AudioRingConsumer {
 pub struct AudioRingBuffer;
 
 impl AudioRingBuffer {
-    /// Create a new ring buffer with the specified capacity.
+    /// Create a new ring buffer with the specified capacity and split into producer/consumer.
     ///
     /// # Arguments
     ///
@@ -120,6 +120,7 @@ impl AudioRingBuffer {
     /// # Returns
     ///
     /// A tuple of (producer, consumer) handles for the buffer.
+    #[allow(clippy::new_ret_no_self)]
     pub fn new(capacity_frames: u32, channels: u8) -> (AudioRingProducer, AudioRingConsumer) {
         let capacity_samples = capacity_frames as usize * channels as usize;
         let rb = HeapRb::<f32>::new(capacity_samples);
@@ -410,7 +411,7 @@ mod tests {
 
     #[test]
     fn test_bounded_buffer_backpressure() {
-        let mut buf = BoundedAudioBuffer::new(100, 1, 0.8, 0.2);
+        let buf = BoundedAudioBuffer::new(100, 1, 0.8, 0.2);
         assert!(!buf.should_backpressure());
         assert!(buf.can_release_backpressure());
         assert!(buf.is_empty());

@@ -93,7 +93,7 @@ impl AudioDevice {
 }
 
 /// System audio environment information.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AudioEnvironment {
     /// PipeWire version (if available)
     pub pipewire_version: Option<String>,
@@ -107,19 +107,6 @@ pub struct AudioEnvironment {
     pub input_devices: Vec<AudioDevice>,
     /// Available output devices
     pub output_devices: Vec<AudioDevice>,
-}
-
-impl Default for AudioEnvironment {
-    fn default() -> Self {
-        Self {
-            pipewire_version: None,
-            pipewire_running: false,
-            default_input: None,
-            default_output: None,
-            input_devices: Vec::new(),
-            output_devices: Vec::new(),
-        }
-    }
 }
 
 #[cfg(test)]

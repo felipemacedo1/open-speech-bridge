@@ -8,9 +8,12 @@ mod playback;
 mod virtual_device;
 
 pub use context::PipeWireContext;
-pub use capture::CaptureStream;
-pub use playback::PlaybackStream;
-pub use virtual_device::VirtualMicrophone;
+pub use capture::{CaptureStream, CaptureStreamBuilder};
+pub use playback::{PlaybackStream, PlaybackStreamBuilder};
+pub use virtual_device::{
+    VirtualMicrophone, VirtualSink,
+    DEFAULT_VIRTUAL_MIC_NAME, DEFAULT_VIRTUAL_SINK_NAME,
+};
 
 use std::process::Command;
 
@@ -33,7 +36,7 @@ pub fn diagnose() -> String {
     if let Ok(output) = Command::new("pipewire").arg("--version").output() {
         if output.status.success() {
             info.push_str("PipeWire: ");
-            info.push_str(&String::from_utf8_lossy(&output.stdout).trim());
+            info.push_str(String::from_utf8_lossy(&output.stdout).trim());
             info.push('\n');
         }
     } else {

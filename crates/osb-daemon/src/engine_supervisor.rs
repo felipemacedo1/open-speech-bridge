@@ -1,9 +1,8 @@
 //! Engine lifecycle management.
 
-use osb_protocol::engine::{EngineId, EngineInfo, EngineState, EngineType};
-use osb_protocol::capability::CapabilitySet;
+use osb_protocol::engine::{EngineId, EngineInfo, EngineState};
 use std::collections::HashMap;
-use tracing::{debug, info, warn};
+use tracing::info;
 
 /// Manages engine lifecycle and health.
 pub struct EngineSupervisor {
@@ -116,7 +115,8 @@ impl Default for EngineSupervisor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use osb_protocol::capability::Capability;
+    use osb_protocol::capability::{Capability, CapabilitySet};
+    use osb_protocol::engine::EngineType;
 
     #[test]
     fn test_engine_registration() {

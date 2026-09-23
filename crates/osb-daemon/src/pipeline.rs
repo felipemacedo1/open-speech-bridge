@@ -3,8 +3,7 @@
 //! The pipeline connects audio streams to processing engines.
 
 use osb_core::audio::AudioFormat;
-use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::info;
 
 /// Pipeline stage identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

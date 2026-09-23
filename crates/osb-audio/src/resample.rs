@@ -15,7 +15,6 @@ pub struct Resampler {
     input_rate: SampleRate,
     output_rate: SampleRate,
     channels: usize,
-    chunk_size: usize,
 }
 
 impl Resampler {
@@ -58,7 +57,6 @@ impl Resampler {
             input_rate,
             output_rate,
             channels,
-            chunk_size,
         })
     }
 
@@ -162,8 +160,8 @@ impl Resampler {
         // Interleave output
         let mut output = Vec::with_capacity(produced * self.channels);
         for frame in 0..produced {
-            for ch in 0..self.channels {
-                output.push(output_channels[ch][frame]);
+            for channel in &output_channels {
+                output.push(channel[frame]);
             }
         }
 
