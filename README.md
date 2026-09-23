@@ -1,6 +1,6 @@
 # OpenSpeechBridge
 
-[![CI](https://github.com/open-speech-bridge/open-speech-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/open-speech-bridge/open-speech-bridge/actions/workflows/ci.yml)
+[![CI](https://github.com/felipemacedo1/open-speech-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/felipemacedo1/open-speech-bridge/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/platform-Linux-lightgrey.svg)](https://pipewire.org/)
@@ -100,7 +100,7 @@ sudo dnf install pipewire pipewire-devel
 ### Build
 
 ```bash
-git clone https://github.com/open-speech-bridge/open-speech-bridge.git
+git clone https://github.com/felipemacedo1/open-speech-bridge.git
 cd open-speech-bridge
 
 # Build all crates

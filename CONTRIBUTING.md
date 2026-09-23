@@ -47,7 +47,7 @@ docker compose exec dev cargo test
 
 ### Reporting Bugs
 
-1. Check if the issue already exists in [Issues](https://github.com/open-speech-bridge/open-speech-bridge/issues)
+1. Check if the issue already exists in [Issues](https://github.com/felipemacedo1/open-speech-bridge/issues)
 2. Create a new issue with:
    - Clear, descriptive title
    - Steps to reproduce
@@ -56,7 +56,7 @@ docker compose exec dev cargo test
 
 ### Suggesting Features
 
-1. Open a [Discussion](https://github.com/open-speech-bridge/open-speech-bridge/discussions) first
+1. Open a [Discussion](https://github.com/felipemacedo1/open-speech-bridge/discussions) first
 2. Describe the use case and motivation
 3. If there's consensus, create an issue for tracking
 
@@ -186,7 +186,7 @@ By contributing, you agree that your contributions will be licensed under the Ap
 
 ## Questions?
 
-- Open a [Discussion](https://github.com/open-speech-bridge/open-speech-bridge/discussions)
-- Check existing [Issues](https://github.com/open-speech-bridge/open-speech-bridge/issues)
+- Open a [Discussion](https://github.com/felipemacedo1/open-speech-bridge/discussions)
+- Check existing [Issues](https://github.com/felipemacedo1/open-speech-bridge/issues)
 
 Thank you for contributing! 🎉
