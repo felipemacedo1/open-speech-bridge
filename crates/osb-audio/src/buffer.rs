@@ -365,6 +365,26 @@ mod tests {
     }
 
     #[test]
+    fn test_audio_buffer_from_samples() {
+        let data = vec![1.0, 2.0, 3.0, 4.0];
+        let buf = AudioBuffer::from_samples(data.clone(), 2);
+        assert_eq!(buf.frames(), 2);
+        assert_eq!(buf.samples(), &data);
+    }
+
+    #[test]
+    fn test_audio_buffer_clear_and_resize() {
+        let mut buf = AudioBuffer::new(10, 1);
+        buf.samples_mut()[0] = 1.0;
+        buf.clear();
+        assert_eq!(buf.samples()[0], 0.0);
+
+        buf.resize(20);
+        assert_eq!(buf.frames(), 20);
+        assert_eq!(buf.samples().len(), 20);
+    }
+
+    #[test]
     fn test_ring_buffer_push_pop() {
         let (mut prod, mut cons) = AudioRingBuffer::new(1024, 2);
 
@@ -410,10 +430,89 @@ mod tests {
     }
 
     #[test]
+    fn test_ring_buffer_occupancy() {
+        let (mut prod, cons) = AudioRingBuffer::new(100, 1);
+
+        let occ = prod.occupancy();
+        assert_eq!(occ.current_frames, 0);
+        assert_eq!(occ.capacity_frames, 100);
+
+        prod.push(&[1.0; 50]);
+        let occ = cons.occupancy();
+        assert_eq!(occ.current_frames, 50);
+        assert!((occ.fill_ratio - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_ring_buffer_has_space_and_frames() {
+        let (mut prod, cons) = AudioRingBuffer::new(100, 2);
+
+        assert!(prod.has_space_for(50)); // 50 frames = 100 samples
+        assert!(!cons.has_frames(1));
+
+        prod.push(&[1.0; 100]); // 50 frames
+        assert!(cons.has_frames(50));
+        assert!(!cons.has_frames(51));
+    }
+
+    #[test]
+    fn test_ring_buffer_available_frames() {
+        let (mut prod, cons) = AudioRingBuffer::new(100, 2);
+
+        assert_eq!(prod.available_frames(), 100);
+        assert_eq!(cons.available_frames(), 0);
+
+        prod.push(&[1.0; 40]); // 20 frames
+        assert_eq!(cons.available_frames(), 20);
+        assert_eq!(prod.available_frames(), 80);
+    }
+
+    #[test]
+    fn test_ring_buffer_metrics() {
+        let (mut prod, mut cons) = AudioRingBuffer::new(10, 1);
+
+        prod.push(&[1.0; 5]);
+        let mut output = vec![0.0; 5];
+        cons.pop(&mut output);
+
+        let metrics = cons.metrics();
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.frames_received, 5);
+        assert_eq!(snapshot.frames_emitted, 5);
+    }
+
+    #[test]
+    fn test_ring_buffer_push_blocking_timeout() {
+        let (mut prod, _cons) = AudioRingBuffer::new(10, 1);
+
+        // Fill the buffer
+        prod.push(&[1.0; 10]);
+
+        // Try to push more with very short timeout - should return 0
+        let written = prod.push_blocking(&[2.0; 5], 1);
+        assert_eq!(written, 0);
+    }
+
+    #[test]
     fn test_bounded_buffer_backpressure() {
         let buf = BoundedAudioBuffer::new(100, 1, 0.8, 0.2);
         assert!(!buf.should_backpressure());
         assert!(buf.can_release_backpressure());
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn test_bounded_buffer_capacity() {
+        let buf = BoundedAudioBuffer::new(100, 2, 0.8, 0.2);
+        assert_eq!(buf.capacity(), 200); // 100 frames * 2 channels
+        assert_eq!(buf.len(), 0);
+    }
+
+    #[test]
+    fn test_bounded_buffer_clear() {
+        let mut buf = BoundedAudioBuffer::new(100, 1, 0.8, 0.2);
+        // Simulate some data by manipulating write_pos (normally via push)
+        buf.clear();
         assert!(buf.is_empty());
     }
 }

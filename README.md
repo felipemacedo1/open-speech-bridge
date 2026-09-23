@@ -1,7 +1,14 @@
 # OpenSpeechBridge
 
+[![CI](https://github.com/open-speech-bridge/open-speech-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/open-speech-bridge/open-speech-bridge/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![CI](https://github.com/user/open-speech-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/user/open-speech-bridge/actions/workflows/ci.yml)
+[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
+[![Platform](https://img.shields.io/badge/platform-Linux-lightgrey.svg)](https://pipewire.org/)
+
+<!-- Future badges (uncomment when published):
+[![Crates.io](https://img.shields.io/crates/v/openspeechbridge.svg)](https://crates.io/crates/openspeechbridge)
+[![Documentation](https://docs.rs/openspeechbridge/badge.svg)](https://docs.rs/openspeechbridge)
+-->
 
 **Local-first real-time speech-to-speech translation runtime for desktop voice conversations.**
 
@@ -93,7 +100,7 @@ sudo dnf install pipewire pipewire-devel
 ### Build
 
 ```bash
-git clone https://github.com/user/open-speech-bridge.git
+git clone https://github.com/open-speech-bridge/open-speech-bridge.git
 cd open-speech-bridge
 
 # Build all crates

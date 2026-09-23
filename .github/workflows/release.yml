@@ -1,0 +1,69 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libpipewire-0.3-dev \
+            libspa-0.2-dev \
+            libclang-dev \
+            llvm-dev \
+            clang
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+        with:
+          toolchain: stable
+
+      - name: Build release binary
+        run: cargo build --release --package osb-cli
+
+      - name: Create tarball
+        run: |
+          mkdir -p release
+          cp target/release/openspeechbridge release/
+          cp README.md LICENSE release/
+          tar -czvf openspeechbridge-linux-x86_64.tar.gz -C release .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openspeechbridge-linux-x86_64
+          path: openspeechbridge-linux-x86_64.tar.gz
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: openspeechbridge-linux-x86_64
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: openspeechbridge-linux-x86_64.tar.gz
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

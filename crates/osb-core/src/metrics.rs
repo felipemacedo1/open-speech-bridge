@@ -224,6 +224,35 @@ mod tests {
     }
 
     #[test]
+    fn test_audio_metrics_underrun() {
+        let metrics = AudioMetrics::new();
+        metrics.record_underrun();
+        metrics.record_underrun();
+        metrics.record_underrun();
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.underruns, 3);
+    }
+
+    #[test]
+    fn test_audio_metrics_multiple_operations() {
+        let metrics = AudioMetrics::new();
+
+        for _ in 0..100 {
+            metrics.record_received(10);
+            metrics.record_emitted(10);
+        }
+        metrics.record_dropped(50);
+        metrics.record_dropped(30);
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.frames_received, 1000);
+        assert_eq!(snapshot.frames_emitted, 1000);
+        assert_eq!(snapshot.frames_dropped, 80);
+        assert_eq!(snapshot.overruns, 2);
+    }
+
+    #[test]
     fn test_buffer_occupancy() {
         let occ = BufferOccupancy::new(50, 100);
         assert!((occ.fill_ratio - 0.5).abs() < 0.001);
@@ -235,6 +264,28 @@ mod tests {
 
         let high = BufferOccupancy::new(95, 100);
         assert!(high.is_high());
+    }
+
+    #[test]
+    fn test_buffer_occupancy_empty() {
+        let occ = BufferOccupancy::new(0, 100);
+        assert_eq!(occ.fill_ratio, 0.0);
+        assert!(occ.is_low());
+        assert!(!occ.is_high());
+    }
+
+    #[test]
+    fn test_buffer_occupancy_full() {
+        let occ = BufferOccupancy::new(100, 100);
+        assert!((occ.fill_ratio - 1.0).abs() < 0.001);
+        assert!(!occ.is_low());
+        assert!(occ.is_high());
+    }
+
+    #[test]
+    fn test_buffer_occupancy_zero_capacity() {
+        let occ = BufferOccupancy::new(0, 0);
+        assert_eq!(occ.fill_ratio, 0.0);
     }
 
     #[test]
@@ -251,5 +302,75 @@ mod tests {
         assert_eq!(stats.count, 10);
         assert!(stats.min_us >= 100);
         assert!(stats.avg_us >= 100);
+    }
+
+    #[test]
+    fn test_latency_tracker_empty() {
+        let tracker = LatencyTracker::new(100);
+        assert!(tracker.stats().is_none());
+    }
+
+    #[test]
+    fn test_latency_tracker_single_sample() {
+        let mut tracker = LatencyTracker::new(100);
+        tracker.start();
+        std::thread::sleep(std::time::Duration::from_micros(50));
+        tracker.stop();
+
+        let stats = tracker.stats().unwrap();
+        assert_eq!(stats.count, 1);
+        assert_eq!(stats.min_us, stats.max_us);
+        assert_eq!(stats.avg_us, stats.min_us);
+        assert_eq!(stats.p95_us, stats.min_us);
+        assert_eq!(stats.p99_us, stats.min_us);
+    }
+
+    #[test]
+    fn test_latency_tracker_clear() {
+        let mut tracker = LatencyTracker::new(100);
+        tracker.start();
+        tracker.stop();
+
+        assert!(tracker.stats().is_some());
+        tracker.clear();
+        assert!(tracker.stats().is_none());
+    }
+
+    #[test]
+    fn test_latency_tracker_max_samples() {
+        let mut tracker = LatencyTracker::new(5);
+
+        for _ in 0..10 {
+            tracker.start();
+            tracker.stop();
+        }
+
+        let stats = tracker.stats().unwrap();
+        assert_eq!(stats.count, 5); // Should only keep last 5
+    }
+
+    #[test]
+    fn test_latency_tracker_stop_without_start() {
+        let mut tracker = LatencyTracker::new(100);
+        tracker.stop(); // Should not panic
+        assert!(tracker.stats().is_none());
+    }
+
+    #[test]
+    fn test_latency_stats_percentiles() {
+        let mut tracker = LatencyTracker::new(100);
+
+        // Add samples with increasing latency
+        for _ in 1..=100 {
+            tracker.start();
+            // Simulate by directly adding samples (we can't easily control timing)
+            tracker.stop();
+        }
+
+        let stats = tracker.stats().unwrap();
+        assert!(stats.p95_us <= stats.p99_us);
+        assert!(stats.p99_us <= stats.max_us);
+        assert!(stats.min_us <= stats.avg_us);
+        assert!(stats.avg_us <= stats.max_us);
     }
 }

@@ -163,7 +163,8 @@ impl Error {
 }
 
 impl AudioError {
-    fn severity(&self) -> ErrorSeverity {
+    /// Get the severity of this audio error.
+    pub fn severity(&self) -> ErrorSeverity {
         match self {
             Self::BufferOverflow { .. } | Self::BufferUnderrun { .. } => ErrorSeverity::Transient,
             Self::DeviceNotFound { .. } | Self::FormatNotSupported(_) => ErrorSeverity::Warning,
@@ -173,16 +174,147 @@ impl AudioError {
             }
         }
     }
+
+    /// Create a device not found error.
+    pub fn device_not_found(name: impl Into<String>) -> Self {
+        Self::DeviceNotFound { name: name.into() }
+    }
+
+    /// Create a device access denied error.
+    pub fn device_access_denied(name: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self::DeviceAccessDenied {
+            name: name.into(),
+            reason: reason.into(),
+        }
+    }
+
+    /// Create a format not supported error.
+    pub fn format_not_supported(desc: impl Into<String>) -> Self {
+        Self::FormatNotSupported(desc.into())
+    }
+
+    /// Create a buffer overflow error.
+    pub fn buffer_overflow(dropped_frames: u64) -> Self {
+        Self::BufferOverflow { dropped_frames }
+    }
+
+    /// Create a buffer underrun error.
+    pub fn buffer_underrun(starved_frames: u64) -> Self {
+        Self::BufferUnderrun { starved_frames }
+    }
+
+    /// Create a resampling error.
+    pub fn resampling_error(reason: impl Into<String>) -> Self {
+        Self::ResamplingError(reason.into())
+    }
+
+    /// Create a PipeWire error.
+    pub fn pipewire(reason: impl Into<String>) -> Self {
+        Self::PipeWire(reason.into())
+    }
+
+    /// Create a stream error.
+    pub fn stream(reason: impl Into<String>) -> Self {
+        Self::Stream(reason.into())
+    }
+
+    /// Check if this is a transient error that may resolve itself.
+    pub fn is_transient(&self) -> bool {
+        matches!(self.severity(), ErrorSeverity::Transient)
+    }
 }
 
 impl EngineError {
-    fn severity(&self) -> ErrorSeverity {
+    /// Get the severity of this engine error.
+    pub fn severity(&self) -> ErrorSeverity {
         match self {
             Self::Timeout { .. } => ErrorSeverity::Transient,
             Self::NotFound { .. } | Self::CapabilityNotSupported { .. } => ErrorSeverity::Warning,
             Self::StartFailed { .. } | Self::Crashed { .. } => ErrorSeverity::Critical,
             Self::Protocol(_) | Self::Model(_) => ErrorSeverity::Warning,
         }
+    }
+
+    /// Create an engine not found error.
+    pub fn not_found(id: impl Into<String>) -> Self {
+        Self::NotFound { id: id.into() }
+    }
+
+    /// Create an engine start failed error.
+    pub fn start_failed(id: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self::StartFailed {
+            id: id.into(),
+            reason: reason.into(),
+        }
+    }
+
+    /// Create an engine crashed error.
+    pub fn crashed(id: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self::Crashed {
+            id: id.into(),
+            reason: reason.into(),
+        }
+    }
+
+    /// Create an engine timeout error.
+    pub fn timeout(id: impl Into<String>, timeout_ms: u64) -> Self {
+        Self::Timeout {
+            id: id.into(),
+            timeout_ms,
+        }
+    }
+
+    /// Create a protocol error.
+    pub fn protocol(reason: impl Into<String>) -> Self {
+        Self::Protocol(reason.into())
+    }
+
+    /// Create a capability not supported error.
+    pub fn capability_not_supported(
+        engine_id: impl Into<String>,
+        capability: impl Into<String>,
+    ) -> Self {
+        Self::CapabilityNotSupported {
+            engine_id: engine_id.into(),
+            capability: capability.into(),
+        }
+    }
+
+    /// Create a model error.
+    pub fn model(reason: impl Into<String>) -> Self {
+        Self::Model(reason.into())
+    }
+
+    /// Check if this error indicates the engine should be restarted.
+    pub fn should_restart(&self) -> bool {
+        matches!(self, Self::Crashed { .. } | Self::Timeout { .. })
+    }
+}
+
+impl ConfigError {
+    /// Create an invalid configuration error.
+    pub fn invalid(field: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self::Invalid {
+            field: field.into(),
+            reason: reason.into(),
+        }
+    }
+
+    /// Create a missing field error.
+    pub fn missing(field: impl Into<String>) -> Self {
+        Self::Missing {
+            field: field.into(),
+        }
+    }
+
+    /// Create a file not found error.
+    pub fn file_not_found(path: impl Into<String>) -> Self {
+        Self::FileNotFound { path: path.into() }
+    }
+
+    /// Create a parse error.
+    pub fn parse(reason: impl Into<String>) -> Self {
+        Self::Parse(reason.into())
     }
 }
 
@@ -206,5 +338,78 @@ mod tests {
             name: "hw:0".to_string(),
         };
         assert!(err.to_string().contains("hw:0"));
+    }
+
+    #[test]
+    fn test_audio_error_constructors() {
+        let _ = AudioError::device_not_found("test");
+        let _ = AudioError::device_access_denied("test", "reason");
+        let _ = AudioError::format_not_supported("test");
+        let _ = AudioError::buffer_overflow(100);
+        let _ = AudioError::buffer_underrun(50);
+        let _ = AudioError::resampling_error("test");
+        let _ = AudioError::pipewire("test");
+        let _ = AudioError::stream("test");
+    }
+
+    #[test]
+    fn test_audio_error_transient() {
+        assert!(AudioError::buffer_overflow(10).is_transient());
+        assert!(AudioError::buffer_underrun(10).is_transient());
+        assert!(!AudioError::device_not_found("test").is_transient());
+    }
+
+    #[test]
+    fn test_engine_error_constructors() {
+        let _ = EngineError::not_found("test");
+        let _ = EngineError::start_failed("test", "reason");
+        let _ = EngineError::crashed("test", "reason");
+        let _ = EngineError::timeout("test", 1000);
+        let _ = EngineError::protocol("test");
+        let _ = EngineError::capability_not_supported("engine", "cap");
+        let _ = EngineError::model("test");
+    }
+
+    #[test]
+    fn test_engine_error_should_restart() {
+        assert!(EngineError::crashed("test", "reason").should_restart());
+        assert!(EngineError::timeout("test", 1000).should_restart());
+        assert!(!EngineError::not_found("test").should_restart());
+    }
+
+    #[test]
+    fn test_config_error_constructors() {
+        let _ = ConfigError::invalid("field", "reason");
+        let _ = ConfigError::missing("field");
+        let _ = ConfigError::file_not_found("/path");
+        let _ = ConfigError::parse("reason");
+    }
+
+    #[test]
+    fn test_error_from_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
+        let err: Error = io_err.into();
+        assert!(matches!(err, Error::Io(_)));
+    }
+
+    #[test]
+    fn test_error_from_audio() {
+        let audio_err = AudioError::device_not_found("test");
+        let err: Error = audio_err.into();
+        assert!(matches!(err, Error::Audio(_)));
+    }
+
+    #[test]
+    fn test_error_from_engine() {
+        let engine_err = EngineError::not_found("test");
+        let err: Error = engine_err.into();
+        assert!(matches!(err, Error::Engine(_)));
+    }
+
+    #[test]
+    fn test_error_from_config() {
+        let config_err = ConfigError::missing("field");
+        let err: Error = config_err.into();
+        assert!(matches!(err, Error::Config(_)));
     }
 }

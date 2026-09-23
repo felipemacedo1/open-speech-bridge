@@ -20,5 +20,5 @@ pub mod convert;
 pub mod resample;
 
 pub use buffer::{AudioBuffer, AudioRingBuffer, BoundedAudioBuffer};
-pub use convert::SampleConverter;
+pub use convert::{deinterleave, interleave, SampleConverter};
 pub use resample::Resampler;

@@ -197,6 +197,18 @@ mod tests {
     }
 
     #[test]
+    fn test_resample_ratio_upsampling() {
+        let ratio = resample_ratio(SampleRate::SPEECH_16K, SampleRate::PRO_48K);
+        assert!((ratio - 3.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_resample_ratio_same_rate() {
+        let ratio = resample_ratio(SampleRate::PRO_48K, SampleRate::PRO_48K);
+        assert!((ratio - 1.0).abs() < 0.001);
+    }
+
+    #[test]
     fn test_output_frame_count() {
         // 48kHz -> 16kHz, 4800 frames (100ms at 48kHz) -> 1600 frames (100ms at 16kHz)
         let out = output_frame_count(4800, SampleRate::PRO_48K, SampleRate::SPEECH_16K);
@@ -204,9 +216,43 @@ mod tests {
     }
 
     #[test]
+    fn test_output_frame_count_upsampling() {
+        // 16kHz -> 48kHz, 1600 frames -> 4800 frames
+        let out = output_frame_count(1600, SampleRate::SPEECH_16K, SampleRate::PRO_48K);
+        assert_eq!(out, 4800);
+    }
+
+    #[test]
+    fn test_output_frame_count_zero() {
+        let out = output_frame_count(0, SampleRate::PRO_48K, SampleRate::SPEECH_16K);
+        assert_eq!(out, 0);
+    }
+
+    #[test]
     fn test_resampler_creation() {
         let resampler = Resampler::new(SampleRate::PRO_48K, SampleRate::SPEECH_16K, 1, 1024);
         assert!(resampler.is_ok());
+    }
+
+    #[test]
+    fn test_resampler_desktop_to_speech() {
+        let resampler = Resampler::desktop_to_speech(1024);
+        assert!(resampler.is_ok());
+
+        let r = resampler.unwrap();
+        assert_eq!(r.input_rate(), SampleRate::PRO_48K);
+        assert_eq!(r.output_rate(), SampleRate::SPEECH_16K);
+        assert_eq!(r.channels(), 1);
+    }
+
+    #[test]
+    fn test_resampler_speech_to_desktop() {
+        let resampler = Resampler::speech_to_desktop(1024);
+        assert!(resampler.is_ok());
+
+        let r = resampler.unwrap();
+        assert_eq!(r.input_rate(), SampleRate::SPEECH_16K);
+        assert_eq!(r.output_rate(), SampleRate::PRO_48K);
     }
 
     #[test]
@@ -226,5 +272,48 @@ mod tests {
         let produced = resampler.process(&input, &mut output).unwrap();
         assert!(produced > 0);
         assert!(produced <= output_frames);
+    }
+
+    #[test]
+    fn test_resampler_reset() {
+        let mut resampler =
+            Resampler::new(SampleRate::PRO_48K, SampleRate::SPEECH_16K, 1, 1024).unwrap();
+
+        // Process some data
+        let input_frames = resampler.input_frames_required();
+        let output_frames = resampler.output_frames();
+        let input: Vec<Vec<f32>> = vec![vec![0.5; input_frames]];
+        let mut output: Vec<Vec<f32>> = vec![vec![0.0; output_frames]];
+        let _ = resampler.process(&input, &mut output);
+
+        // Reset and verify it doesn't panic
+        resampler.reset();
+
+        // Process again after reset
+        let produced = resampler.process(&input, &mut output).unwrap();
+        assert!(produced > 0);
+    }
+
+    #[test]
+    fn test_resampler_stereo() {
+        let resampler = Resampler::new(SampleRate::PRO_48K, SampleRate::SPEECH_16K, 2, 1024);
+        assert!(resampler.is_ok());
+
+        let r = resampler.unwrap();
+        assert_eq!(r.channels(), 2);
+    }
+
+    #[test]
+    fn test_resampler_process_interleaved() {
+        let mut resampler =
+            Resampler::new(SampleRate::PRO_48K, SampleRate::SPEECH_16K, 1, 1024).unwrap();
+
+        let input_frames = resampler.input_frames_required();
+
+        // Create interleaved input (mono, so same as non-interleaved)
+        let input: Vec<f32> = (0..input_frames).map(|i| (i as f32 * 0.01).sin()).collect();
+
+        let output = resampler.process_interleaved(&input).unwrap();
+        assert!(!output.is_empty());
     }
 }
