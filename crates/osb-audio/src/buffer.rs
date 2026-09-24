@@ -3,12 +3,22 @@
 //! This module provides bounded, lock-free buffers for real-time audio processing.
 //! The primary buffer type is [`AudioRingBuffer`], a SPSC ring buffer suitable
 //! for passing audio between threads without blocking.
+//!
+//! # Thread Safety
+//!
+//! The [`AudioRingProducer`] and [`AudioRingConsumer`] are both `Send`, allowing
+//! them to be moved to different threads. This is essential for real-time audio
+//! where the producer runs in the audio callback thread (e.g., PipeWire) and
+//! the consumer runs in the processing thread.
+//!
+//! # Real-time Safety
+//!
+//! All operations on the ring buffer are lock-free and wait-free:
+//! - No memory allocation after creation
+//! - No blocking operations
+//! - No system calls in the hot path
 
 use osb_core::metrics::{AudioMetrics, BufferOccupancy};
-use ringbuf::{
-    traits::{Consumer, Observer, Producer, Split},
-    HeapRb,
-};
 use std::sync::Arc;
 use tracing::{debug, warn};
 
@@ -70,27 +80,61 @@ impl AudioBuffer {
     }
 }
 
-/// Producer half of an audio ring buffer.
-pub struct AudioRingProducer {
-    inner: ringbuf::HeapProd<f32>,
+/// Shared state between producer and consumer for metrics tracking.
+struct SharedState {
+    metrics: AudioMetrics,
     capacity_frames: u32,
     channels: u8,
-    metrics: Arc<AudioMetrics>,
 }
 
-/// Consumer half of an audio ring buffer.
-pub struct AudioRingConsumer {
-    inner: ringbuf::HeapCons<f32>,
-    capacity_frames: u32,
-    channels: u8,
-    metrics: Arc<AudioMetrics>,
+/// Producer half of an audio ring buffer.
+///
+/// This type is `Send`, allowing it to be moved to another thread
+/// (e.g., a PipeWire audio callback thread).
+///
+/// # Real-time Safety
+///
+/// The `push` method is lock-free and does not allocate memory,
+/// making it safe to call from real-time audio contexts.
+pub struct AudioRingProducer {
+    inner: rtrb::Producer<f32>,
+    shared: Arc<SharedState>,
+    /// Local counter to avoid atomic operations in hot path
+    local_received: u64,
+    local_dropped: u64,
 }
+
+// SAFETY: rtrb::Producer is Send, and we only share Arc<SharedState> which is Sync
+unsafe impl Send for AudioRingProducer {}
+
+/// Consumer half of an audio ring buffer.
+///
+/// This type is `Send`, allowing it to be moved to another thread.
+///
+/// # Real-time Safety
+///
+/// The `pop` and `pop_or_silence` methods are lock-free and do not
+/// allocate memory, making them safe to call from real-time audio contexts.
+pub struct AudioRingConsumer {
+    inner: rtrb::Consumer<f32>,
+    shared: Arc<SharedState>,
+    /// Local counter to avoid atomic operations in hot path
+    local_emitted: u64,
+}
+
+// SAFETY: rtrb::Consumer is Send, and we only share Arc<SharedState> which is Sync
+unsafe impl Send for AudioRingConsumer {}
 
 /// A lock-free SPSC ring buffer for audio samples.
 ///
 /// This buffer is designed for real-time audio processing where one thread
 /// produces samples (e.g., audio capture) and another consumes them
 /// (e.g., processing or playback).
+///
+/// # Thread Safety
+///
+/// The producer and consumer can be safely moved to different threads.
+/// This is the key improvement over the previous `ringbuf`-based implementation.
 ///
 /// # Example
 ///
@@ -107,6 +151,26 @@ pub struct AudioRingConsumer {
 /// let mut output = vec![0.0f32; 256];
 /// consumer.pop(&mut output);
 /// ```
+///
+/// # Cross-thread Example
+///
+/// ```
+/// use osb_audio::AudioRingBuffer;
+/// use std::thread;
+///
+/// let (mut producer, mut consumer) = AudioRingBuffer::new(1024, 2);
+///
+/// // Move producer to another thread (this works because Producer is Send)
+/// let producer_thread = thread::spawn(move || {
+///     let samples = vec![0.5f32; 256];
+///     producer.push(&samples)
+/// });
+///
+/// // Consumer stays in main thread
+/// let mut output = vec![0.0f32; 256];
+/// producer_thread.join().unwrap();
+/// consumer.pop(&mut output);
+/// ```
 pub struct AudioRingBuffer;
 
 impl AudioRingBuffer {
@@ -120,25 +184,29 @@ impl AudioRingBuffer {
     /// # Returns
     ///
     /// A tuple of (producer, consumer) handles for the buffer.
+    /// Both handles are `Send` and can be moved to different threads.
     #[allow(clippy::new_ret_no_self)]
     pub fn new(capacity_frames: u32, channels: u8) -> (AudioRingProducer, AudioRingConsumer) {
         let capacity_samples = capacity_frames as usize * channels as usize;
-        let rb = HeapRb::<f32>::new(capacity_samples);
-        let (prod, cons) = rb.split();
-        let metrics = Arc::new(AudioMetrics::new());
+        let (prod, cons) = rtrb::RingBuffer::new(capacity_samples);
+
+        let shared = Arc::new(SharedState {
+            metrics: AudioMetrics::new(),
+            capacity_frames,
+            channels,
+        });
 
         (
             AudioRingProducer {
                 inner: prod,
-                capacity_frames,
-                channels,
-                metrics: Arc::clone(&metrics),
+                shared: Arc::clone(&shared),
+                local_received: 0,
+                local_dropped: 0,
             },
             AudioRingConsumer {
                 inner: cons,
-                capacity_frames,
-                channels,
-                metrics,
+                shared,
+                local_emitted: 0,
             },
         )
     }
@@ -147,30 +215,56 @@ impl AudioRingBuffer {
 impl AudioRingProducer {
     /// Push samples into the buffer.
     ///
+    /// # Real-time Safety
+    ///
+    /// This method is lock-free and does not allocate memory.
+    /// Safe to call from audio callback threads.
+    ///
     /// # Returns
     ///
     /// Number of samples actually written. May be less than input if buffer is full.
     pub fn push(&mut self, samples: &[f32]) -> usize {
-        let written = self.inner.push_slice(samples);
-        let frames = written / self.channels as usize;
-        self.metrics.record_received(frames as u64);
+        let slots = self.inner.slots();
+        let to_write = samples.len().min(slots);
 
-        if written < samples.len() {
-            let dropped = (samples.len() - written) / self.channels as usize;
-            self.metrics.record_dropped(dropped as u64);
+        if to_write > 0 {
+            // Use write_chunk for efficient bulk copy
+            if let Ok(mut chunk) = self.inner.write_chunk(to_write) {
+                let (first, second) = chunk.as_mut_slices();
+                let first_len = first.len();
+
+                if to_write <= first_len {
+                    first[..to_write].copy_from_slice(&samples[..to_write]);
+                } else {
+                    first.copy_from_slice(&samples[..first_len]);
+                    second[..to_write - first_len].copy_from_slice(&samples[first_len..to_write]);
+                }
+                chunk.commit_all();
+            }
+        }
+
+        let frames = to_write / self.shared.channels as usize;
+        self.local_received += frames as u64;
+
+        if to_write < samples.len() {
+            let dropped_samples = samples.len() - to_write;
+            let dropped_frames = dropped_samples / self.shared.channels as usize;
+            self.local_dropped += dropped_frames as u64;
             warn!(
-                dropped_frames = dropped,
+                dropped_frames = dropped_frames,
                 "audio buffer overflow - frames dropped"
             );
         }
 
-        written
+        to_write
     }
 
     /// Push samples, blocking until space is available or timeout.
     /// Returns the number of samples written.
     ///
-    /// Note: This is NOT real-time safe. Use only in non-real-time contexts.
+    /// # Warning
+    ///
+    /// This is NOT real-time safe. Use only in non-real-time contexts.
     pub fn push_blocking(&mut self, samples: &[f32], timeout_ms: u64) -> usize {
         use std::time::{Duration, Instant};
 
@@ -178,7 +272,7 @@ impl AudioRingProducer {
         let mut total_written = 0;
 
         while total_written < samples.len() && Instant::now() < deadline {
-            let written = self.inner.push_slice(&samples[total_written..]);
+            let written = self.push(&samples[total_written..]);
             total_written += written;
 
             if written == 0 {
@@ -186,63 +280,107 @@ impl AudioRingProducer {
             }
         }
 
-        let frames = total_written / self.channels as usize;
-        self.metrics.record_received(frames as u64);
         total_written
     }
 
     /// Get current buffer occupancy.
     pub fn occupancy(&self) -> BufferOccupancy {
-        let current_samples = self.inner.occupied_len();
-        let current_frames = current_samples / self.channels as usize;
-        BufferOccupancy::new(current_frames as u32, self.capacity_frames)
+        let current_samples = self.inner.slots();
+        let capacity_samples = self.shared.capacity_frames as usize * self.shared.channels as usize;
+        let occupied = capacity_samples - current_samples;
+        let current_frames = occupied / self.shared.channels as usize;
+        BufferOccupancy::new(current_frames as u32, self.shared.capacity_frames)
     }
 
     /// Check if the buffer has space for at least `frames` frames.
     #[inline]
     pub fn has_space_for(&self, frames: u32) -> bool {
-        let samples_needed = frames as usize * self.channels as usize;
-        self.inner.vacant_len() >= samples_needed
+        let samples_needed = frames as usize * self.shared.channels as usize;
+        self.inner.slots() >= samples_needed
     }
 
     /// Get remaining capacity in frames.
     #[inline]
     pub fn available_frames(&self) -> u32 {
-        (self.inner.vacant_len() / self.channels as usize) as u32
+        (self.inner.slots() / self.shared.channels as usize) as u32
+    }
+
+    /// Flush local metrics to the shared metrics.
+    ///
+    /// Call this periodically from non-real-time context to update metrics.
+    pub fn flush_metrics(&mut self) {
+        if self.local_received > 0 {
+            self.shared.metrics.record_received(self.local_received);
+            self.local_received = 0;
+        }
+        if self.local_dropped > 0 {
+            self.shared.metrics.record_dropped(self.local_dropped);
+            self.local_dropped = 0;
+        }
+    }
+}
+
+impl Drop for AudioRingProducer {
+    fn drop(&mut self) {
+        self.flush_metrics();
     }
 }
 
 impl AudioRingConsumer {
     /// Pop samples from the buffer.
     ///
+    /// # Real-time Safety
+    ///
+    /// This method is lock-free and does not allocate memory.
+    /// Safe to call from audio callback threads.
+    ///
     /// # Returns
     ///
     /// Number of samples actually read. May be less than buffer size if not enough data.
     pub fn pop(&mut self, output: &mut [f32]) -> usize {
-        let read = self.inner.pop_slice(output);
-        let frames = read / self.channels as usize;
-        self.metrics.record_emitted(frames as u64);
+        let available = self.inner.slots();
+        let to_read = output.len().min(available);
 
-        if read < output.len() && read == 0 {
-            self.metrics.record_underrun();
+        if to_read > 0 {
+            if let Ok(chunk) = self.inner.read_chunk(to_read) {
+                let (first, second) = chunk.as_slices();
+                let first_len = first.len();
+
+                if to_read <= first_len {
+                    output[..to_read].copy_from_slice(&first[..to_read]);
+                } else {
+                    output[..first_len].copy_from_slice(first);
+                    output[first_len..to_read].copy_from_slice(&second[..to_read - first_len]);
+                }
+                chunk.commit_all();
+            }
+        }
+
+        let frames = to_read / self.shared.channels as usize;
+        self.local_emitted += frames as u64;
+
+        if to_read < output.len() && to_read == 0 {
+            self.shared.metrics.record_underrun();
             debug!("audio buffer underrun");
         }
 
-        read
+        to_read
     }
 
     /// Pop samples, filling with silence if not enough data available.
     /// Always fills the entire output buffer.
+    ///
+    /// # Real-time Safety
+    ///
+    /// This method is lock-free and does not allocate memory.
+    /// Safe to call from audio callback threads.
     pub fn pop_or_silence(&mut self, output: &mut [f32]) -> usize {
-        let read = self.inner.pop_slice(output);
-        let frames = read / self.channels as usize;
-        self.metrics.record_emitted(frames as u64);
+        let read = self.pop(output);
 
         if read < output.len() {
             // Fill remaining with silence
             output[read..].fill(0.0);
             if read == 0 {
-                self.metrics.record_underrun();
                 debug!("audio buffer underrun - filled with silence");
             }
         }
@@ -252,27 +390,43 @@ impl AudioRingConsumer {
 
     /// Get current buffer occupancy.
     pub fn occupancy(&self) -> BufferOccupancy {
-        let current_samples = self.inner.occupied_len();
-        let current_frames = current_samples / self.channels as usize;
-        BufferOccupancy::new(current_frames as u32, self.capacity_frames)
+        let current_samples = self.inner.slots();
+        let current_frames = current_samples / self.shared.channels as usize;
+        BufferOccupancy::new(current_frames as u32, self.shared.capacity_frames)
     }
 
     /// Check if at least `frames` frames are available.
     #[inline]
     pub fn has_frames(&self, frames: u32) -> bool {
-        let samples_needed = frames as usize * self.channels as usize;
-        self.inner.occupied_len() >= samples_needed
+        let samples_needed = frames as usize * self.shared.channels as usize;
+        self.inner.slots() >= samples_needed
     }
 
     /// Get number of available frames.
     #[inline]
     pub fn available_frames(&self) -> u32 {
-        (self.inner.occupied_len() / self.channels as usize) as u32
+        (self.inner.slots() / self.shared.channels as usize) as u32
     }
 
     /// Get a reference to the metrics.
     pub fn metrics(&self) -> &AudioMetrics {
-        &self.metrics
+        &self.shared.metrics
+    }
+
+    /// Flush local metrics to the shared metrics.
+    ///
+    /// Call this periodically from non-real-time context to update metrics.
+    pub fn flush_metrics(&mut self) {
+        if self.local_emitted > 0 {
+            self.shared.metrics.record_emitted(self.local_emitted);
+            self.local_emitted = 0;
+        }
+    }
+}
+
+impl Drop for AudioRingConsumer {
+    fn drop(&mut self) {
+        self.flush_metrics();
     }
 }
 
@@ -475,6 +629,10 @@ mod tests {
         let mut output = vec![0.0; 5];
         cons.pop(&mut output);
 
+        // Flush metrics before checking
+        prod.flush_metrics();
+        cons.flush_metrics();
+
         let metrics = cons.metrics();
         let snapshot = metrics.snapshot();
         assert_eq!(snapshot.frames_received, 5);
@@ -511,8 +669,58 @@ mod tests {
     #[test]
     fn test_bounded_buffer_clear() {
         let mut buf = BoundedAudioBuffer::new(100, 1, 0.8, 0.2);
-        // Simulate some data by manipulating write_pos (normally via push)
         buf.clear();
         assert!(buf.is_empty());
+    }
+
+    /// Test that producer can be sent to another thread.
+    #[test]
+    fn test_producer_is_send() {
+        let (producer, _consumer) = AudioRingBuffer::new(64, 1);
+
+        // This compiles only if AudioRingProducer is Send
+        std::thread::spawn(move || {
+            let _ = producer;
+        })
+        .join()
+        .unwrap();
+    }
+
+    /// Test that consumer can be sent to another thread.
+    #[test]
+    fn test_consumer_is_send() {
+        let (_producer, consumer) = AudioRingBuffer::new(64, 1);
+
+        // This compiles only if AudioRingConsumer is Send
+        std::thread::spawn(move || {
+            let _ = consumer;
+        })
+        .join()
+        .unwrap();
+    }
+
+    /// Test cross-thread communication.
+    #[test]
+    fn test_cross_thread_communication() {
+        let (mut producer, mut consumer) = AudioRingBuffer::new(1024, 1);
+
+        let producer_thread = std::thread::spawn(move || {
+            let samples: Vec<f32> = (0..100).map(|i| i as f32).collect();
+            producer.push(&samples);
+            producer // Return producer to flush metrics
+        });
+
+        // Give producer time to write
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        let mut output = vec![0.0f32; 100];
+        let read = consumer.pop(&mut output);
+
+        let _producer = producer_thread.join().unwrap();
+
+        assert_eq!(read, 100);
+        for (i, &sample) in output.iter().enumerate().take(100) {
+            assert_eq!(sample, i as f32);
+        }
     }
 }

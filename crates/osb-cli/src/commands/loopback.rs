@@ -147,8 +147,6 @@ fn truncate_str(s: &str, max_len: usize) -> String {
 
 #[cfg(target_os = "linux")]
 async fn run_linux_loopback(device: &str, duration: u64, json_output: bool) -> Result<()> {
-    use osb_audio::buffer::AudioRingBuffer;
-
     info!(device = %device, "initializing loopback");
 
     // Initialize PipeWire context
@@ -166,25 +164,25 @@ async fn run_linux_loopback(device: &str, duration: u64, json_output: bool) -> R
     // This provides good tolerance for processing jitter
     const BUFFER_FRAMES: u32 = 4096;
     const SAMPLE_RATE: u32 = 48000;
-    const CHANNELS: u8 = 2;
-
-    // Create shared ring buffer
-    // The buffer is split into producer (for capture) and consumer (for virtual mic)
-    let (_producer, _consumer) = AudioRingBuffer::new(BUFFER_FRAMES, CHANNELS);
 
     // Create capture stream
-    let (mut capture, mut capture_consumer) =
-        CaptureStream::new(&ctx, device, BUFFER_FRAMES).context("Failed to create capture stream")?;
+    // Returns (CaptureStream, AudioRingConsumer)
+    // - CaptureStream owns the producer (moved to PipeWire thread on start)
+    // - Consumer is returned for reading captured audio
+    let (mut capture, mut capture_consumer) = CaptureStream::new(&ctx, device, BUFFER_FRAMES)
+        .context("Failed to create capture stream")?;
 
     // Create virtual microphone
-    let (mut vmic, mut vmic_producer) = VirtualMicrophone::new(
-        &ctx,
-        "OpenSpeechBridge Virtual Microphone",
-        BUFFER_FRAMES,
-    )
-    .context("Failed to create virtual microphone")?;
+    // Returns (VirtualMicrophone, AudioRingProducer)
+    // - VirtualMicrophone owns the consumer (moved to PipeWire thread on start)
+    // - Producer is returned for writing audio to send to apps
+    let (mut vmic, mut vmic_producer) =
+        VirtualMicrophone::new(&ctx, "OpenSpeechBridge Virtual Microphone", BUFFER_FRAMES)
+            .context("Failed to create virtual microphone")?;
 
     // Start the streams
+    // Note: After start(), the internal producer/consumer are moved to
+    // dedicated threads. We use the returned handles for the loopback.
     capture.start().context("Failed to start capture")?;
     vmic.start().context("Failed to start virtual microphone")?;
 
@@ -204,12 +202,15 @@ async fn run_linux_loopback(device: &str, duration: u64, json_output: bool) -> R
     let mut first_print = true;
     let mut transfer_buffer = vec![0.0f32; 1024];
 
-    // Main loop
+    // Main loop: transfer audio from capture consumer to virtual mic producer
+    // This implements the loopback:
+    //   [Mic] -> [CaptureStream] -> [Ring Buffer] -> [capture_consumer]
+    //                                                        |
+    //                                                        v
+    //   [Apps] <- [VirtualMic] <- [Ring Buffer] <- [vmic_producer]
     loop {
-        // Transfer audio from capture to virtual mic
-        // In a real implementation with working PipeWire streams,
-        // this would happen automatically via callbacks.
-        // For now, we simulate the transfer for testing.
+        // Read from capture and write to virtual mic
+        // Both operations are lock-free (rtrb SPSC buffers)
         let read = capture_consumer.pop(&mut transfer_buffer);
         if read > 0 {
             vmic_producer.push(&transfer_buffer[..read]);
@@ -218,9 +219,11 @@ async fn run_linux_loopback(device: &str, duration: u64, json_output: bool) -> R
 
         // Update metrics
         metrics.elapsed = start_time.elapsed();
-        metrics.buffer_fill = capture.buffer_occupancy();
-        metrics.latency_ms = (BUFFER_FRAMES as f32 / SAMPLE_RATE as f32) * 1000.0
-            * metrics.buffer_fill;
+        // Note: buffer_occupancy() returns 0 after start() since producer moved
+        // In production, we'd track this via atomic counters or metrics API
+        metrics.buffer_fill = vmic_producer.occupancy().fill_ratio;
+        metrics.latency_ms =
+            (BUFFER_FRAMES as f32 / SAMPLE_RATE as f32) * 1000.0 * metrics.buffer_fill;
 
         // Print metrics (every 500ms)
         if !json_output && metrics.elapsed.as_millis() % 500 < 50 {

@@ -93,7 +93,9 @@ async fn main() -> anyhow::Result<()> {
             commands::devices::run(input, output, json_output).await
         }
         Commands::Doctor => commands::doctor::run(json_output).await,
-        Commands::Loopback { input, duration } => commands::loopback::run(input, duration, json_output).await,
+        Commands::Loopback { input, duration } => {
+            commands::loopback::run(input, duration, json_output).await
+        }
         Commands::Run { config, foreground } => commands::run::run(config, foreground).await,
         Commands::Version => commands::version::run(json_output),
         Commands::Engines => commands::engines::run(json_output).await,

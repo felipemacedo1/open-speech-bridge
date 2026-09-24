@@ -3,6 +3,22 @@
 //! Virtual devices allow OpenSpeechBridge to inject audio into applications
 //! (virtual microphone) or capture audio from applications (virtual sink).
 //!
+//! # Architecture
+//!
+//! ```text
+//! VirtualMicrophone (Audio Source):
+//! [Producer] --> [Ring Buffer] --> [VirtualMicrophone] --> [PipeWire] --> [Apps]
+//!                                         |
+//!                                   [Dedicated Thread]
+//!                                   (owns Consumer)
+//!
+//! VirtualSink (Audio Sink):
+//! [Apps] --> [PipeWire] --> [VirtualSink] --> [Ring Buffer] --> [Consumer]
+//!                                |
+//!                          [Dedicated Thread]
+//!                          (owns Producer)
+//! ```
+//!
 //! # Real-time Safety
 //!
 //! The PipeWire audio callback runs in a real-time context. All code in the
@@ -12,12 +28,18 @@
 //! - NO blocking I/O (disk, network)
 //! - NO unbounded operations
 //!
-//! We achieve this by using lock-free SPSC ring buffers for audio data transfer.
+//! We achieve this by using lock-free SPSC ring buffers (`rtrb`) for audio data transfer.
+//! Both `AudioRingProducer` and `AudioRingConsumer` are `Send`, allowing them to be
+//! moved to PipeWire callback threads.
 
 use super::context::PipeWireContext;
-use crate::error::Result;
+use crate::error::{PipeWireError, Result};
 use osb_audio::buffer::{AudioRingBuffer, AudioRingConsumer, AudioRingProducer};
 use osb_core::audio::{AudioFormat, ChannelLayout, SampleFormat, SampleRate};
+use pipewire as pw;
+use pw::properties::properties;
+use pw::spa;
+use pw::spa::pod::Pod;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
@@ -34,24 +56,30 @@ const DEFAULT_BUFFER_FRAMES: u32 = 4096;
 /// # Architecture
 ///
 /// ```text
-/// [Producer] --> [Ring Buffer] --> [VirtualMicrophone] --> [PipeWire] --> [Apps]
+/// [Producer] --> [Ring Buffer] --> [VirtualMicrophone Thread] --> [PipeWire] --> [Apps]
+///     ^                                      |
+///     |                                [Dedicated Thread]
+/// (returned to caller)                 (owns Consumer)
 /// ```
 ///
-/// - The producer (returned by `new()`) receives translated audio
-/// - The VirtualMicrophone reads from the ring buffer in the PipeWire callback
-/// - Applications receive the audio as if from a real microphone
+/// - The producer (returned by `new()`) receives translated audio from caller
+/// - The VirtualMicrophone runs a thread that reads from the ring buffer
+/// - PipeWire callback sends audio to applications
 ///
 /// # Real-time Safety
 ///
 /// The `process` callback uses `pop_or_silence()` which:
-/// - Never blocks (lock-free SPSC buffer)
+/// - Never blocks (lock-free SPSC buffer via `rtrb`)
 /// - Never allocates (fills existing buffer in-place)
 /// - Always returns valid audio (silence on underrun)
+///
+/// # Thread Model
+///
+/// The `AudioRingConsumer` is `Send` (via `rtrb`), allowing it to be moved
+/// to the PipeWire thread where it will read audio data lock-free.
 pub struct VirtualMicrophone {
     /// Display name for the virtual microphone.
     name: String,
-    /// Consumer side of the lock-free ring buffer.
-    consumer: AudioRingConsumer,
     /// Audio format specification.
     format: AudioFormat,
     /// Thread-safe running state flag.
@@ -60,6 +88,8 @@ pub struct VirtualMicrophone {
     node_id: Arc<AtomicU32>,
     /// Thread handle for the PipeWire main loop.
     thread_handle: Option<std::thread::JoinHandle<()>>,
+    /// Consumer for stub mode (before start). None after start().
+    stub_consumer: Option<AudioRingConsumer>,
 }
 
 impl VirtualMicrophone {
@@ -81,12 +111,12 @@ impl VirtualMicrophone {
     ///
     /// ```ignore
     /// let ctx = PipeWireContext::new()?;
-    /// let (mut vmic, producer) = VirtualMicrophone::new(&ctx, "My Virtual Mic", 4096)?;
+    /// let (mut vmic, mut producer) = VirtualMicrophone::new(&ctx, "My Virtual Mic", 4096)?;
     ///
     /// // Start the virtual microphone
     /// vmic.start()?;
     ///
-    /// // Write audio to the producer (from another thread)
+    /// // Write audio to the producer (from any thread - producer is Send)
     /// producer.push(&audio_samples);
     ///
     /// // Stop when done
@@ -120,11 +150,11 @@ impl VirtualMicrophone {
 
         let vmic = Self {
             name: name.to_string(),
-            consumer,
             format,
             is_running: Arc::new(AtomicBool::new(false)),
             node_id: Arc::new(AtomicU32::new(0)),
             thread_handle: None,
+            stub_consumer: Some(consumer),
         };
 
         Ok((vmic, producer))
@@ -168,6 +198,9 @@ impl VirtualMicrophone {
     /// and registers it with the PipeWire graph. The device will appear in
     /// application device lists (Discord, Zoom, etc.) as an available microphone.
     ///
+    /// The `AudioRingConsumer` is moved to a dedicated thread where it will
+    /// be used by the PipeWire process callback.
+    ///
     /// # PipeWire Node Properties
     ///
     /// - `media.class = "Audio/Source/Virtual"` - Identifies as virtual audio source
@@ -190,25 +223,35 @@ impl VirtualMicrophone {
 
         info!(name = %self.name, "starting virtual microphone");
 
-        // NOTE: Full PipeWire stream implementation requires the consumer to be
-        // accessible from the PipeWire callback thread. Since AudioRingConsumer
-        // is not Send+Sync (uses internal Rc), we would need to either:
-        //
-        // 1. Use a thread-safe wrapper (Arc<Mutex<...>>) - but this violates real-time safety
-        // 2. Create the stream in the same thread as the consumer
-        // 3. Use raw pointers with careful lifetime management
-        //
-        // For now, we mark the device as running and log the intent.
-        // The actual PipeWire stream creation will be implemented when we have
-        // a thread-safe ring buffer or can restructure the ownership model.
-        //
-        // Real implementation would:
-        // 1. Create a PipeWire node with media.class = "Audio/Source/Virtual"
-        // 2. Register metadata for app visibility
-        // 3. Set up process callback to call self.read_samples()
+        // Take the consumer - it will be moved to the PipeWire thread
+        let consumer = match self.stub_consumer.take() {
+            Some(c) => c,
+            None => {
+                warn!(name = %self.name, "virtual microphone already started or consumer consumed");
+                return Ok(());
+            }
+        };
 
+        // Clone shared state for the thread
+        let is_running = Arc::clone(&self.is_running);
+        let node_id = Arc::clone(&self.node_id);
+        let name = self.name.clone();
+        let format = self.format;
+
+        // Spawn the PipeWire thread
+        let handle = std::thread::Builder::new()
+            .name(format!("pw-vmic-{}", name))
+            .spawn(move || {
+                if let Err(e) = run_virtual_mic_loop(consumer, &name, format, is_running, node_id) {
+                    error!(name = %name, error = %e, "virtual mic loop failed");
+                }
+            })
+            .map_err(|e| PipeWireError::Internal(format!("failed to spawn thread: {}", e)))?;
+
+        self.thread_handle = Some(handle);
         self.is_running.store(true, Ordering::Release);
-        info!(name = %self.name, "virtual microphone started (stub mode)");
+
+        info!(name = %self.name, "virtual microphone started");
         Ok(())
     }
 
@@ -230,11 +273,11 @@ impl VirtualMicrophone {
         // Wait for the thread to finish
         if let Some(handle) = self.thread_handle.take() {
             // Give the thread a moment to notice the stop signal
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            std::thread::sleep(std::time::Duration::from_millis(100));
 
-            // The thread should exit on its own, but we join anyway
-            if handle.join().is_err() {
-                warn!(name = %self.name, "virtual microphone thread panicked");
+            match handle.join() {
+                Ok(()) => debug!(name = %self.name, "virtual mic thread joined"),
+                Err(_) => warn!(name = %self.name, "virtual mic thread panicked"),
             }
         }
 
@@ -243,11 +286,10 @@ impl VirtualMicrophone {
         Ok(())
     }
 
-    /// Read samples to provide to applications.
+    /// Read samples to provide to applications (stub mode only).
     ///
-    /// This method is called by the PipeWire process callback to fill
-    /// the output buffer with audio data. It reads from the internal
-    /// ring buffer, filling with silence if not enough data is available.
+    /// This method is only available before `start()` is called, as the
+    /// consumer is moved to the PipeWire thread on start.
     ///
     /// # Real-time Safety
     ///
@@ -263,21 +305,285 @@ impl VirtualMicrophone {
     /// # Returns
     ///
     /// Number of samples actually read from the buffer (may be less than
-    /// `output.len()` if buffer was partially empty; remainder is silence).
+    /// `output.len()` if buffer was partially empty; remainder is silence),
+    /// or 0 if the stream has been started (consumer no longer available).
     pub fn read_samples(&mut self, output: &mut [f32]) -> usize {
-        self.consumer.pop_or_silence(output)
+        if let Some(ref mut consumer) = self.stub_consumer {
+            consumer.pop_or_silence(output)
+        } else {
+            // Consumer has been moved to PipeWire thread, fill with silence
+            output.fill(0.0);
+            0
+        }
     }
 
     /// Get current buffer occupancy as a ratio (0.0 to 1.0).
     ///
-    /// Useful for monitoring buffer health:
-    /// - Near 0.0: Risk of underruns (producer too slow)
-    /// - Near 1.0: Risk of overruns (consumer too slow)
-    /// - Around 0.5: Healthy buffer level
+    /// Note: Only accurate in stub mode before `start()` is called.
     #[inline]
     pub fn buffer_occupancy(&self) -> f32 {
-        self.consumer.occupancy().fill_ratio
+        if let Some(ref consumer) = self.stub_consumer {
+            consumer.occupancy().fill_ratio
+        } else {
+            0.0 // Can't check occupancy after consumer moved
+        }
     }
+}
+
+/// User data passed to PipeWire stream callbacks for virtual microphone.
+///
+/// This struct is owned by the PipeWire listener and provides access to
+/// the ring buffer consumer within the process callback.
+///
+/// # Real-time Safety
+///
+/// All fields used in the process callback must support lock-free operations:
+/// - `consumer`: uses `rtrb` lock-free SPSC ring buffer
+struct VirtualMicUserData {
+    /// Lock-free ring buffer consumer for audio samples.
+    consumer: AudioRingConsumer,
+}
+
+/// Run the PipeWire virtual microphone loop in a dedicated thread.
+///
+/// This function owns the `AudioRingConsumer` and provides audio to PipeWire.
+/// It creates a real PipeWire stream with `media.class = "Audio/Source/Virtual"`
+/// that appears as a microphone in applications.
+///
+/// # PipeWire Integration
+///
+/// 1. Creates a `MainLoop` for event processing
+/// 2. Creates a `Context` and connects to PipeWire daemon
+/// 3. Creates a `Stream` with virtual audio source properties
+/// 4. Registers a real-time safe `process` callback
+/// 5. Connects with `Direction::Output` to provide audio
+/// 6. Runs the main loop until `is_running` is set to false
+///
+/// # Real-time Safety
+///
+/// The `process` callback only uses:
+/// - `consumer.pop_or_silence()`: lock-free ring buffer read
+/// - No allocations, no locks, no I/O
+fn run_virtual_mic_loop(
+    consumer: AudioRingConsumer,
+    name: &str,
+    format: AudioFormat,
+    is_running: Arc<AtomicBool>,
+    node_id: Arc<AtomicU32>,
+) -> Result<()> {
+    // Initialize PipeWire for this thread
+    pw::init();
+
+    let channels = format.channels.channels() as u32;
+    let rate = format.sample_rate.hz();
+
+    info!(
+        name = %name,
+        channels = channels,
+        rate = rate,
+        "virtual mic loop starting with real PipeWire integration"
+    );
+
+    // Create the PipeWire main loop
+    let mainloop = pw::main_loop::MainLoop::new(None).map_err(|e| {
+        PipeWireError::ConnectionFailed(format!("failed to create main loop: {}", e))
+    })?;
+
+    // Create context and connect to PipeWire daemon
+    let context = pw::context::Context::new(&mainloop)
+        .map_err(|e| PipeWireError::ConnectionFailed(format!("failed to create context: {}", e)))?;
+
+    let core = context.connect(None).map_err(|e| {
+        PipeWireError::ConnectionFailed(format!("failed to connect to PipeWire daemon: {}", e))
+    })?;
+
+    info!(name = %name, "connected to PipeWire daemon for virtual mic");
+
+    // Build stream properties for virtual audio source
+    // media.class = "Audio/Source/Virtual" makes this appear as a microphone
+    let stream_props = properties! {
+        *pw::keys::MEDIA_TYPE => "Audio",
+        *pw::keys::MEDIA_CATEGORY => "Capture",  // From app's perspective, this is a capture device
+        *pw::keys::MEDIA_ROLE => "Communication",
+        *pw::keys::MEDIA_CLASS => "Audio/Source/Virtual",
+        *pw::keys::NODE_NAME => "openspeechbridge-virtual-mic",
+        *pw::keys::NODE_DESCRIPTION => name,
+    };
+
+    // Create the virtual mic stream
+    let stream = pw::stream::Stream::new(&core, "osb-virtual-mic", stream_props).map_err(|e| {
+        PipeWireError::StreamCreationFailed(format!("failed to create virtual mic stream: {}", e))
+    })?;
+
+    // Prepare user data for callbacks
+    let user_data = VirtualMicUserData { consumer };
+
+    // Clone references for callbacks
+    let mainloop_weak = mainloop.downgrade();
+
+    // Register stream listener with callbacks
+    let _listener = stream
+        .add_local_listener_with_user_data(user_data)
+        .state_changed(move |stream, _user_data, old, new| {
+            debug!(?old, ?new, "virtual mic stream state changed");
+
+            match &new {
+                pw::stream::StreamState::Error(err) => {
+                    error!(error = %err, "virtual mic stream error");
+                    // Quit the main loop on error
+                    if let Some(ml) = mainloop_weak.upgrade() {
+                        ml.quit();
+                    }
+                }
+                pw::stream::StreamState::Unconnected => {
+                    warn!("virtual mic stream disconnected");
+                }
+                pw::stream::StreamState::Streaming => {
+                    // Get and store the node ID when streaming starts
+                    let id = stream.node_id();
+                    info!(node_id = id, "virtual mic stream now streaming");
+                }
+                _ => {}
+            }
+        })
+        .process(|stream, user_data| {
+            // REAL-TIME SAFE CALLBACK
+            // This runs in PipeWire's real-time audio thread.
+            // Only lock-free operations allowed here.
+
+            if let Some(mut buffer) = stream.dequeue_buffer() {
+                let datas = buffer.datas_mut();
+                if let Some(data) = datas.first_mut() {
+                    if let Some(slice) = data.data() {
+                        // Calculate how many samples we can write
+                        let num_samples = slice.len() / 4; // 4 bytes per f32
+
+                        // Use a stack buffer to read from ring buffer
+                        // Then convert to bytes for PipeWire
+                        let mut sample_buf = [0.0f32; 512]; // Stack buffer, no allocation
+                        let mut byte_offset = 0usize;
+
+                        while byte_offset + 4 <= slice.len() {
+                            let batch_samples =
+                                ((slice.len() - byte_offset) / 4).min(sample_buf.len());
+
+                            // Read from ring buffer (lock-free, real-time safe)
+                            // pop_or_silence fills with zeros if buffer is empty
+                            let _read = user_data
+                                .consumer
+                                .pop_or_silence(&mut sample_buf[..batch_samples]);
+
+                            // Convert f32 samples to F32LE bytes
+                            for (i, &sample) in sample_buf[..batch_samples].iter().enumerate() {
+                                let bytes = sample.to_le_bytes();
+                                let idx = byte_offset + i * 4;
+                                if idx + 4 <= slice.len() {
+                                    slice[idx] = bytes[0];
+                                    slice[idx + 1] = bytes[1];
+                                    slice[idx + 2] = bytes[2];
+                                    slice[idx + 3] = bytes[3];
+                                }
+                            }
+
+                            byte_offset += batch_samples * 4;
+                        }
+
+                        // Update chunk metadata to indicate how much data we wrote
+                        let chunk = data.chunk_mut();
+                        *chunk.offset_mut() = 0;
+                        *chunk.stride_mut() = 4; // 4 bytes per sample for interleaved F32
+                        *chunk.size_mut() = (num_samples * 4) as u32;
+                    }
+                }
+                // Buffer is automatically queued back when dropped
+            }
+        })
+        .register()
+        .map_err(|e| {
+            PipeWireError::StreamCreationFailed(format!("failed to register listener: {}", e))
+        })?;
+
+    // Build audio format parameters
+    let spa_format = match format.sample_format {
+        SampleFormat::F32 => spa::param::audio::AudioFormat::F32LE,
+        SampleFormat::I16 => spa::param::audio::AudioFormat::S16LE,
+        SampleFormat::I32 => spa::param::audio::AudioFormat::S32LE,
+        _ => spa::param::audio::AudioFormat::F32LE, // Default to F32
+    };
+
+    let mut audio_info = spa::param::audio::AudioInfoRaw::new();
+    audio_info.set_format(spa_format);
+    audio_info.set_rate(rate);
+    audio_info.set_channels(channels);
+
+    // Serialize audio format to POD
+    let values: Vec<u8> = pw::spa::pod::serialize::PodSerializer::serialize(
+        std::io::Cursor::new(Vec::new()),
+        &pw::spa::pod::Value::Object(pw::spa::pod::Object {
+            type_: pw::spa::sys::SPA_TYPE_OBJECT_Format,
+            id: pw::spa::sys::SPA_PARAM_EnumFormat,
+            properties: audio_info.into(),
+        }),
+    )
+    .map_err(|e| PipeWireError::Internal(format!("failed to serialize audio format: {:?}", e)))?
+    .0
+    .into_inner();
+
+    let mut params = [Pod::from_bytes(&values)
+        .ok_or_else(|| PipeWireError::Internal("failed to create format pod".to_string()))?];
+
+    // Connect the stream (Direction::Output for providing audio to apps)
+    stream
+        .connect(
+            spa::utils::Direction::Output,
+            None, // No specific target, apps will connect to us
+            pw::stream::StreamFlags::AUTOCONNECT
+                | pw::stream::StreamFlags::MAP_BUFFERS
+                | pw::stream::StreamFlags::RT_PROCESS,
+            &mut params,
+        )
+        .map_err(|e| {
+            PipeWireError::StreamCreationFailed(format!(
+                "failed to connect virtual mic stream: {}",
+                e
+            ))
+        })?;
+
+    // Store the node ID
+    node_id.store(stream.node_id(), Ordering::Release);
+
+    info!(
+        name = %name,
+        node_id = stream.node_id(),
+        "virtual mic stream connected, entering main loop"
+    );
+
+    // Set up a timer to check is_running flag periodically
+    let is_running_timer = Arc::clone(&is_running);
+    let mainloop_for_timer = mainloop.downgrade();
+    let _timer = mainloop.loop_().add_timer(move |_| {
+        if !is_running_timer.load(Ordering::Acquire) {
+            if let Some(ml) = mainloop_for_timer.upgrade() {
+                ml.quit();
+            }
+        }
+    });
+    _timer
+        .update_timer(
+            Some(std::time::Duration::from_millis(100)),
+            Some(std::time::Duration::from_millis(100)),
+        )
+        .into_result()
+        .map_err(|e| PipeWireError::Internal(format!("failed to set timer: {:?}", e)))?;
+
+    // Run the main loop (blocks until quit)
+    mainloop.run();
+
+    // Cleanup
+    let _ = stream.disconnect();
+
+    info!(name = %name, "virtual mic loop exiting");
+    Ok(())
 }
 
 impl Drop for VirtualMicrophone {
@@ -298,17 +604,18 @@ impl Drop for VirtualMicrophone {
 /// # Architecture
 ///
 /// ```text
-/// [Apps] --> [PipeWire] --> [VirtualSink] --> [Ring Buffer] --> [Consumer]
+/// [Apps] --> [PipeWire] --> [VirtualSink Thread] --> [Ring Buffer] --> [Consumer]
+///                                   |                                      ^
+///                            [Dedicated Thread]                    (returned to caller)
+///                            (owns Producer)
 /// ```
 ///
-/// - Applications send audio to the virtual sink
-/// - The VirtualSink writes to the ring buffer in the PipeWire callback
+/// - Applications send audio to the virtual sink via PipeWire
+/// - The VirtualSink runs a thread that writes to the ring buffer
 /// - The consumer (returned by `new()`) receives the captured audio
 pub struct VirtualSink {
     /// Display name for the virtual sink.
     name: String,
-    /// Producer side of the lock-free ring buffer.
-    producer: AudioRingProducer,
     /// Audio format specification.
     format: AudioFormat,
     /// Thread-safe running state flag.
@@ -317,6 +624,8 @@ pub struct VirtualSink {
     node_id: Arc<AtomicU32>,
     /// Thread handle for the PipeWire main loop.
     thread_handle: Option<std::thread::JoinHandle<()>>,
+    /// Producer for stub mode (before start). None after start().
+    stub_producer: Option<AudioRingProducer>,
 }
 
 impl VirtualSink {
@@ -359,11 +668,11 @@ impl VirtualSink {
 
         let sink = Self {
             name: name.to_string(),
-            producer,
             format,
             is_running: Arc::new(AtomicBool::new(false)),
             node_id: Arc::new(AtomicU32::new(0)),
             thread_handle: None,
+            stub_producer: Some(producer),
         };
 
         Ok((sink, consumer))
@@ -408,8 +717,37 @@ impl VirtualSink {
         }
 
         info!(name = %self.name, "starting virtual sink");
+
+        // Take the producer - it will be moved to the PipeWire thread
+        let producer = match self.stub_producer.take() {
+            Some(p) => p,
+            None => {
+                warn!(name = %self.name, "virtual sink already started or producer consumed");
+                return Ok(());
+            }
+        };
+
+        // Clone shared state for the thread
+        let is_running = Arc::clone(&self.is_running);
+        let node_id = Arc::clone(&self.node_id);
+        let name = self.name.clone();
+        let format = self.format;
+
+        // Spawn the PipeWire thread
+        let handle = std::thread::Builder::new()
+            .name(format!("pw-vsink-{}", name))
+            .spawn(move || {
+                if let Err(e) = run_virtual_sink_loop(producer, &name, format, is_running, node_id)
+                {
+                    error!(name = %name, error = %e, "virtual sink loop failed");
+                }
+            })
+            .map_err(|e| PipeWireError::Internal(format!("failed to spawn thread: {}", e)))?;
+
+        self.thread_handle = Some(handle);
         self.is_running.store(true, Ordering::Release);
-        info!(name = %self.name, "virtual sink started (stub mode)");
+
+        info!(name = %self.name, "virtual sink started");
         Ok(())
     }
 
@@ -423,9 +761,10 @@ impl VirtualSink {
         self.is_running.store(false, Ordering::Release);
 
         if let Some(handle) = self.thread_handle.take() {
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            if handle.join().is_err() {
-                warn!(name = %self.name, "virtual sink thread panicked");
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            match handle.join() {
+                Ok(()) => debug!(name = %self.name, "virtual sink thread joined"),
+                Err(_) => warn!(name = %self.name, "virtual sink thread panicked"),
             }
         }
 
@@ -433,14 +772,282 @@ impl VirtualSink {
         Ok(())
     }
 
-    /// Write samples received from applications (called by audio callback).
+    /// Write samples received from applications (stub mode only).
+    ///
+    /// This method is only available before `start()` is called.
     ///
     /// # Real-time Safety
     ///
     /// This method is real-time safe - uses lock-free ring buffer.
     pub fn write_samples(&mut self, samples: &[f32]) -> usize {
-        self.producer.push(samples)
+        if let Some(ref mut producer) = self.stub_producer {
+            producer.push(samples)
+        } else {
+            0
+        }
     }
+}
+
+/// User data passed to PipeWire stream callbacks for virtual sink.
+///
+/// This struct is owned by the PipeWire listener and provides access to
+/// the ring buffer producer within the process callback.
+///
+/// # Real-time Safety
+///
+/// All fields used in the process callback must support lock-free operations:
+/// - `producer`: uses `rtrb` lock-free SPSC ring buffer
+struct VirtualSinkUserData {
+    /// Lock-free ring buffer producer for audio samples.
+    producer: AudioRingProducer,
+}
+
+/// Run the PipeWire virtual sink loop in a dedicated thread.
+///
+/// This function owns the `AudioRingProducer` and receives audio from PipeWire.
+/// It creates a real PipeWire stream with `media.class = "Audio/Sink"` that
+/// applications can send audio to.
+///
+/// # PipeWire Integration
+///
+/// 1. Creates a `MainLoop` for event processing
+/// 2. Creates a `Context` and connects to PipeWire daemon
+/// 3. Creates a `Stream` with virtual audio sink properties
+/// 4. Registers a real-time safe `process` callback
+/// 5. Connects with `Direction::Input` to receive audio
+/// 6. Runs the main loop until `is_running` is set to false
+///
+/// # Real-time Safety
+///
+/// The `process` callback only uses:
+/// - `producer.push()`: lock-free ring buffer write
+/// - No allocations, no locks, no I/O
+fn run_virtual_sink_loop(
+    producer: AudioRingProducer,
+    name: &str,
+    format: AudioFormat,
+    is_running: Arc<AtomicBool>,
+    node_id: Arc<AtomicU32>,
+) -> Result<()> {
+    // Initialize PipeWire for this thread
+    pw::init();
+
+    let channels = format.channels.channels() as u32;
+    let rate = format.sample_rate.hz();
+
+    info!(
+        name = %name,
+        channels = channels,
+        rate = rate,
+        "virtual sink loop starting with real PipeWire integration"
+    );
+
+    // Create the PipeWire main loop
+    let mainloop = pw::main_loop::MainLoop::new(None).map_err(|e| {
+        PipeWireError::ConnectionFailed(format!("failed to create main loop: {}", e))
+    })?;
+
+    // Create context and connect to PipeWire daemon
+    let context = pw::context::Context::new(&mainloop)
+        .map_err(|e| PipeWireError::ConnectionFailed(format!("failed to create context: {}", e)))?;
+
+    let core = context.connect(None).map_err(|e| {
+        PipeWireError::ConnectionFailed(format!("failed to connect to PipeWire daemon: {}", e))
+    })?;
+
+    info!(name = %name, "connected to PipeWire daemon for virtual sink");
+
+    // Build stream properties for virtual audio sink
+    // media.class = "Audio/Sink" makes this appear as an audio output device
+    let stream_props = properties! {
+        *pw::keys::MEDIA_TYPE => "Audio",
+        *pw::keys::MEDIA_CATEGORY => "Playback",  // From app's perspective, this is a playback device
+        *pw::keys::MEDIA_ROLE => "Communication",
+        *pw::keys::MEDIA_CLASS => "Audio/Sink",
+        *pw::keys::NODE_NAME => "openspeechbridge-virtual-sink",
+        *pw::keys::NODE_DESCRIPTION => name,
+    };
+
+    // Create the virtual sink stream
+    let stream = pw::stream::Stream::new(&core, "osb-virtual-sink", stream_props).map_err(|e| {
+        PipeWireError::StreamCreationFailed(format!("failed to create virtual sink stream: {}", e))
+    })?;
+
+    // Prepare user data for callbacks
+    let user_data = VirtualSinkUserData { producer };
+
+    // Clone references for callbacks
+    let mainloop_weak = mainloop.downgrade();
+
+    // Register stream listener with callbacks
+    let _listener = stream
+        .add_local_listener_with_user_data(user_data)
+        .state_changed(move |stream, _user_data, old, new| {
+            debug!(?old, ?new, "virtual sink stream state changed");
+
+            match &new {
+                pw::stream::StreamState::Error(err) => {
+                    error!(error = %err, "virtual sink stream error");
+                    // Quit the main loop on error
+                    if let Some(ml) = mainloop_weak.upgrade() {
+                        ml.quit();
+                    }
+                }
+                pw::stream::StreamState::Unconnected => {
+                    warn!("virtual sink stream disconnected");
+                }
+                pw::stream::StreamState::Streaming => {
+                    let id = stream.node_id();
+                    info!(node_id = id, "virtual sink stream now streaming");
+                }
+                _ => {}
+            }
+        })
+        .process(|stream, user_data| {
+            // REAL-TIME SAFE CALLBACK
+            // This runs in PipeWire's real-time audio thread.
+            // Only lock-free operations allowed here.
+
+            if let Some(mut buffer) = stream.dequeue_buffer() {
+                let datas = buffer.datas_mut();
+                if let Some(data) = datas.first_mut() {
+                    // Read chunk info first (immutable borrow)
+                    let offset = data.chunk().offset() as usize;
+                    let size = data.chunk().size() as usize;
+
+                    // Now get mutable access to the data slice
+                    if let Some(slice) = data.data() {
+                        // Bounds check
+                        if offset + size <= slice.len() {
+                            let audio_bytes = &slice[offset..offset + size];
+
+                            // Convert bytes to f32 samples (F32LE format)
+                            let mut sample_buf = [0.0f32; 512]; // Stack buffer, no allocation
+                            let mut byte_offset = 0usize;
+
+                            while byte_offset + 4 <= audio_bytes.len() {
+                                let batch_size =
+                                    ((audio_bytes.len() - byte_offset) / 4).min(sample_buf.len());
+
+                                // Note: Using index loop here because we need both:
+                                // 1. Index for sample_buf assignment
+                                // 2. Calculated index into audio_bytes based on byte_offset
+                                #[allow(clippy::needless_range_loop)]
+                                for i in 0..batch_size {
+                                    let idx = byte_offset + i * 4;
+                                    if idx + 4 <= audio_bytes.len() {
+                                        let bytes: [u8; 4] = [
+                                            audio_bytes[idx],
+                                            audio_bytes[idx + 1],
+                                            audio_bytes[idx + 2],
+                                            audio_bytes[idx + 3],
+                                        ];
+                                        sample_buf[i] = f32::from_le_bytes(bytes);
+                                    }
+                                }
+
+                                // Push batch to ring buffer (lock-free, real-time safe)
+                                let pushed = user_data.producer.push(&sample_buf[..batch_size]);
+
+                                if pushed < batch_size {
+                                    // Buffer full, stop processing this frame
+                                    break;
+                                }
+
+                                byte_offset += batch_size * 4;
+                            }
+                        }
+                    }
+                }
+                // Buffer is automatically queued back when dropped
+            }
+        })
+        .register()
+        .map_err(|e| {
+            PipeWireError::StreamCreationFailed(format!("failed to register listener: {}", e))
+        })?;
+
+    // Build audio format parameters
+    let spa_format = match format.sample_format {
+        SampleFormat::F32 => spa::param::audio::AudioFormat::F32LE,
+        SampleFormat::I16 => spa::param::audio::AudioFormat::S16LE,
+        SampleFormat::I32 => spa::param::audio::AudioFormat::S32LE,
+        _ => spa::param::audio::AudioFormat::F32LE, // Default to F32
+    };
+
+    let mut audio_info = spa::param::audio::AudioInfoRaw::new();
+    audio_info.set_format(spa_format);
+    audio_info.set_rate(rate);
+    audio_info.set_channels(channels);
+
+    // Serialize audio format to POD
+    let values: Vec<u8> = pw::spa::pod::serialize::PodSerializer::serialize(
+        std::io::Cursor::new(Vec::new()),
+        &pw::spa::pod::Value::Object(pw::spa::pod::Object {
+            type_: pw::spa::sys::SPA_TYPE_OBJECT_Format,
+            id: pw::spa::sys::SPA_PARAM_EnumFormat,
+            properties: audio_info.into(),
+        }),
+    )
+    .map_err(|e| PipeWireError::Internal(format!("failed to serialize audio format: {:?}", e)))?
+    .0
+    .into_inner();
+
+    let mut params = [Pod::from_bytes(&values)
+        .ok_or_else(|| PipeWireError::Internal("failed to create format pod".to_string()))?];
+
+    // Connect the stream (Direction::Input for receiving audio from apps)
+    stream
+        .connect(
+            spa::utils::Direction::Input,
+            None, // No specific source, apps will connect to us
+            pw::stream::StreamFlags::AUTOCONNECT
+                | pw::stream::StreamFlags::MAP_BUFFERS
+                | pw::stream::StreamFlags::RT_PROCESS,
+            &mut params,
+        )
+        .map_err(|e| {
+            PipeWireError::StreamCreationFailed(format!(
+                "failed to connect virtual sink stream: {}",
+                e
+            ))
+        })?;
+
+    // Store the node ID
+    node_id.store(stream.node_id(), Ordering::Release);
+
+    info!(
+        name = %name,
+        node_id = stream.node_id(),
+        "virtual sink stream connected, entering main loop"
+    );
+
+    // Set up a timer to check is_running flag periodically
+    let is_running_timer = Arc::clone(&is_running);
+    let mainloop_for_timer = mainloop.downgrade();
+    let _timer = mainloop.loop_().add_timer(move |_| {
+        if !is_running_timer.load(Ordering::Acquire) {
+            if let Some(ml) = mainloop_for_timer.upgrade() {
+                ml.quit();
+            }
+        }
+    });
+    _timer
+        .update_timer(
+            Some(std::time::Duration::from_millis(100)),
+            Some(std::time::Duration::from_millis(100)),
+        )
+        .into_result()
+        .map_err(|e| PipeWireError::Internal(format!("failed to set timer: {:?}", e)))?;
+
+    // Run the main loop (blocks until quit)
+    mainloop.run();
+
+    // Cleanup
+    let _ = stream.disconnect();
+
+    info!(name = %name, "virtual sink loop exiting");
+    Ok(())
 }
 
 impl Drop for VirtualSink {
