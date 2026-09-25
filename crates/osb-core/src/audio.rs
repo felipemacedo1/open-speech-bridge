@@ -64,7 +64,7 @@ impl fmt::Display for SampleRate {
 }
 
 /// Sample format specification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SampleFormat {
     /// 16-bit signed integer (little-endian)
@@ -72,6 +72,7 @@ pub enum SampleFormat {
     /// 32-bit signed integer (little-endian)
     I32,
     /// 32-bit floating point [-1.0, 1.0]
+    #[default]
     F32,
     /// 64-bit floating point [-1.0, 1.0]
     F64,
@@ -95,12 +96,6 @@ impl SampleFormat {
     }
 }
 
-impl Default for SampleFormat {
-    fn default() -> Self {
-        Self::F32
-    }
-}
-
 impl fmt::Display for SampleFormat {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -113,12 +108,13 @@ impl fmt::Display for SampleFormat {
 }
 
 /// Channel layout specification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChannelLayout {
     /// Single channel (mono)
     Mono,
     /// Two channels (stereo)
+    #[default]
     Stereo,
 }
 
@@ -130,12 +126,6 @@ impl ChannelLayout {
             Self::Mono => 1,
             Self::Stereo => 2,
         }
-    }
-}
-
-impl Default for ChannelLayout {
-    fn default() -> Self {
-        Self::Stereo
     }
 }
 
