@@ -32,6 +32,10 @@
 //! Both `AudioRingProducer` and `AudioRingConsumer` are `Send`, allowing them to be
 //! moved to PipeWire callback threads.
 
+use super::common::{
+    build_audio_format_pod, bytes_to_f32_samples, f32_samples_to_bytes, setup_stop_timer,
+    RT_BATCH_SIZE,
+};
 use super::context::PipeWireContext;
 use crate::error::{PipeWireError, Result};
 use osb_audio::buffer::{AudioRingBuffer, AudioRingConsumer, AudioRingProducer};
@@ -499,42 +503,32 @@ fn run_virtual_mic_loop(
                             return;
                         }
                         let output = &mut slice[offset..offset + size];
-                        // The chunk size is the negotiated quantum. The backing
-                        // slice can be larger and must not be treated as audio.
                         let num_samples = output.len() / 4;
 
-                        // Use a stack buffer to read from ring buffer
-                        // Then convert to bytes for PipeWire
-                        let mut sample_buf = [0.0f32; 512]; // Stack buffer, no allocation
+                        // Process in batches using stack buffer (no allocation)
+                        let mut sample_buf = [0.0f32; RT_BATCH_SIZE];
                         let mut byte_offset = 0usize;
                         let mut frames_requested = 0u64;
                         let mut frames_consumed = 0u64;
 
                         while byte_offset + 4 <= output.len() {
                             let batch_samples =
-                                ((output.len() - byte_offset) / 4).min(sample_buf.len());
+                                ((output.len() - byte_offset) / 4).min(RT_BATCH_SIZE);
                             frames_requested += (batch_samples / channels as usize) as u64;
 
                             // Read from ring buffer (lock-free, real-time safe)
-                            // pop_or_silence fills with zeros if buffer is empty
                             let read = user_data
                                 .consumer
                                 .pop_or_silence(&mut sample_buf[..batch_samples]);
                             frames_consumed += (read / channels as usize) as u64;
 
-                            // Convert f32 samples to F32LE bytes
-                            for (i, &sample) in sample_buf[..batch_samples].iter().enumerate() {
-                                let bytes = sample.to_le_bytes();
-                                let idx = byte_offset + i * 4;
-                                if idx + 4 <= output.len() {
-                                    output[idx] = bytes[0];
-                                    output[idx + 1] = bytes[1];
-                                    output[idx + 2] = bytes[2];
-                                    output[idx + 3] = bytes[3];
-                                }
-                            }
+                            // Convert f32 samples to F32LE bytes using common helper
+                            let written = f32_samples_to_bytes(
+                                &sample_buf[..batch_samples],
+                                &mut output[byte_offset..],
+                            );
 
-                            byte_offset += batch_samples * 4;
+                            byte_offset += written;
                         }
                         user_data
                             .metrics
@@ -548,7 +542,7 @@ fn run_virtual_mic_loop(
                         // Update chunk metadata to indicate how much data we wrote
                         let chunk = data.chunk_mut();
                         *chunk.offset_mut() = 0;
-                        *chunk.stride_mut() = 4; // 4 bytes per sample for interleaved F32
+                        *chunk.stride_mut() = 4;
                         *chunk.size_mut() = (num_samples * 4) as u32;
                     }
                 }
@@ -560,32 +554,8 @@ fn run_virtual_mic_loop(
             PipeWireError::StreamCreationFailed(format!("failed to register listener: {}", e))
         })?;
 
-    // Build audio format parameters
-    let spa_format = match format.sample_format {
-        SampleFormat::F32 => spa::param::audio::AudioFormat::F32LE,
-        SampleFormat::I16 => spa::param::audio::AudioFormat::S16LE,
-        SampleFormat::I32 => spa::param::audio::AudioFormat::S32LE,
-        _ => spa::param::audio::AudioFormat::F32LE, // Default to F32
-    };
-
-    let mut audio_info = spa::param::audio::AudioInfoRaw::new();
-    audio_info.set_format(spa_format);
-    audio_info.set_rate(rate);
-    audio_info.set_channels(channels);
-
-    // Serialize audio format to POD
-    let values: Vec<u8> = pw::spa::pod::serialize::PodSerializer::serialize(
-        std::io::Cursor::new(Vec::new()),
-        &pw::spa::pod::Value::Object(pw::spa::pod::Object {
-            type_: pw::spa::sys::SPA_TYPE_OBJECT_Format,
-            id: pw::spa::sys::SPA_PARAM_EnumFormat,
-            properties: audio_info.into(),
-        }),
-    )
-    .map_err(|e| PipeWireError::Internal(format!("failed to serialize audio format: {:?}", e)))?
-    .0
-    .into_inner();
-
+    // Build audio format parameters using common helper
+    let values = build_audio_format_pod(format)?;
     let mut params = [Pod::from_bytes(&values)
         .ok_or_else(|| PipeWireError::Internal("failed to create format pod".to_string()))?];
 
@@ -618,22 +588,7 @@ fn run_virtual_mic_loop(
     );
 
     // Set up a timer to check is_running flag periodically
-    let is_running_timer = Arc::clone(&is_running);
-    let mainloop_for_timer = mainloop.downgrade();
-    let _timer = mainloop.loop_().add_timer(move |_| {
-        if !is_running_timer.load(Ordering::Acquire) {
-            if let Some(ml) = mainloop_for_timer.upgrade() {
-                ml.quit();
-            }
-        }
-    });
-    _timer
-        .update_timer(
-            Some(std::time::Duration::from_millis(100)),
-            Some(std::time::Duration::from_millis(100)),
-        )
-        .into_result()
-        .map_err(|e| PipeWireError::Internal(format!("failed to set timer: {:?}", e)))?;
+    let _timer = setup_stop_timer(&mainloop, is_running, 100)?;
 
     // Run the main loop (blocks until quit)
     mainloop.run();
@@ -970,50 +925,36 @@ fn run_virtual_sink_loop(
             if let Some(mut buffer) = stream.dequeue_buffer() {
                 let datas = buffer.datas_mut();
                 if let Some(data) = datas.first_mut() {
-                    // Read chunk info first (immutable borrow)
                     let offset = data.chunk().offset() as usize;
                     let size = data.chunk().size() as usize;
 
-                    // Now get mutable access to the data slice
                     if let Some(slice) = data.data() {
-                        // Bounds check
                         if offset + size <= slice.len() {
                             let audio_bytes = &slice[offset..offset + size];
 
-                            // Convert bytes to f32 samples (F32LE format)
-                            let mut sample_buf = [0.0f32; 512]; // Stack buffer, no allocation
+                            // Process in batches using stack buffer (no allocation)
+                            let mut sample_buf = [0.0f32; RT_BATCH_SIZE];
                             let mut byte_offset = 0usize;
 
                             while byte_offset + 4 <= audio_bytes.len() {
-                                let batch_size =
-                                    ((audio_bytes.len() - byte_offset) / 4).min(sample_buf.len());
+                                let batch_bytes = &audio_bytes[byte_offset..];
+                                let batch_samples = (batch_bytes.len() / 4).min(RT_BATCH_SIZE);
 
-                                // Note: Using index loop here because we need both:
-                                // 1. Index for sample_buf assignment
-                                // 2. Calculated index into audio_bytes based on byte_offset
-                                #[allow(clippy::needless_range_loop)]
-                                for i in 0..batch_size {
-                                    let idx = byte_offset + i * 4;
-                                    if idx + 4 <= audio_bytes.len() {
-                                        let bytes: [u8; 4] = [
-                                            audio_bytes[idx],
-                                            audio_bytes[idx + 1],
-                                            audio_bytes[idx + 2],
-                                            audio_bytes[idx + 3],
-                                        ];
-                                        sample_buf[i] = f32::from_le_bytes(bytes);
-                                    }
-                                }
+                                // Convert bytes to f32 using common helper
+                                let converted = bytes_to_f32_samples(
+                                    &batch_bytes[..batch_samples * 4],
+                                    &mut sample_buf[..batch_samples],
+                                );
 
                                 // Push batch to ring buffer (lock-free, real-time safe)
-                                let pushed = user_data.producer.push(&sample_buf[..batch_size]);
+                                let pushed = user_data.producer.push(&sample_buf[..converted]);
 
-                                if pushed < batch_size {
+                                if pushed < converted {
                                     // Buffer full, stop processing this frame
                                     break;
                                 }
 
-                                byte_offset += batch_size * 4;
+                                byte_offset += converted * 4;
                             }
                         }
                     }
@@ -1026,32 +967,8 @@ fn run_virtual_sink_loop(
             PipeWireError::StreamCreationFailed(format!("failed to register listener: {}", e))
         })?;
 
-    // Build audio format parameters
-    let spa_format = match format.sample_format {
-        SampleFormat::F32 => spa::param::audio::AudioFormat::F32LE,
-        SampleFormat::I16 => spa::param::audio::AudioFormat::S16LE,
-        SampleFormat::I32 => spa::param::audio::AudioFormat::S32LE,
-        _ => spa::param::audio::AudioFormat::F32LE, // Default to F32
-    };
-
-    let mut audio_info = spa::param::audio::AudioInfoRaw::new();
-    audio_info.set_format(spa_format);
-    audio_info.set_rate(rate);
-    audio_info.set_channels(channels);
-
-    // Serialize audio format to POD
-    let values: Vec<u8> = pw::spa::pod::serialize::PodSerializer::serialize(
-        std::io::Cursor::new(Vec::new()),
-        &pw::spa::pod::Value::Object(pw::spa::pod::Object {
-            type_: pw::spa::sys::SPA_TYPE_OBJECT_Format,
-            id: pw::spa::sys::SPA_PARAM_EnumFormat,
-            properties: audio_info.into(),
-        }),
-    )
-    .map_err(|e| PipeWireError::Internal(format!("failed to serialize audio format: {:?}", e)))?
-    .0
-    .into_inner();
-
+    // Build audio format parameters using common helper
+    let values = build_audio_format_pod(format)?;
     let mut params = [Pod::from_bytes(&values)
         .ok_or_else(|| PipeWireError::Internal("failed to create format pod".to_string()))?];
 
@@ -1082,22 +999,7 @@ fn run_virtual_sink_loop(
     );
 
     // Set up a timer to check is_running flag periodically
-    let is_running_timer = Arc::clone(&is_running);
-    let mainloop_for_timer = mainloop.downgrade();
-    let _timer = mainloop.loop_().add_timer(move |_| {
-        if !is_running_timer.load(Ordering::Acquire) {
-            if let Some(ml) = mainloop_for_timer.upgrade() {
-                ml.quit();
-            }
-        }
-    });
-    _timer
-        .update_timer(
-            Some(std::time::Duration::from_millis(100)),
-            Some(std::time::Duration::from_millis(100)),
-        )
-        .into_result()
-        .map_err(|e| PipeWireError::Internal(format!("failed to set timer: {:?}", e)))?;
+    let _timer = setup_stop_timer(&mainloop, is_running, 100)?;
 
     // Run the main loop (blocks until quit)
     mainloop.run();

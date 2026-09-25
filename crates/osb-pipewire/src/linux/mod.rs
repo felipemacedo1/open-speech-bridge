@@ -3,6 +3,7 @@
 //! This module provides the actual PipeWire integration for Linux systems.
 
 mod capture;
+mod common;
 mod context;
 mod playback;
 mod virtual_device;

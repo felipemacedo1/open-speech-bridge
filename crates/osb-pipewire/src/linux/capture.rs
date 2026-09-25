@@ -25,6 +25,9 @@
 //! We achieve this by using lock-free SPSC ring buffers (`rtrb`) for audio data transfer.
 //! The `AudioRingProducer` is `Send`, allowing it to be moved to the PipeWire callback thread.
 
+use super::common::{
+    build_audio_format_pod, bytes_to_f32_samples, setup_stop_timer, RT_BATCH_SIZE,
+};
 use super::context::PipeWireContext;
 use crate::error::{PipeWireError, Result};
 use osb_audio::buffer::{AudioRingBuffer, AudioRingConsumer, AudioRingProducer};
@@ -557,51 +560,33 @@ fn run_capture_loop(
                         // Bounds check
                         if offset + size <= slice.len() {
                             let audio_bytes = &slice[offset..offset + size];
-
-                            // Convert bytes to f32 samples (F32LE format)
-                            // Each f32 sample is 4 bytes in little-endian
                             let num_samples = audio_bytes.len() / 4;
 
-                            // SAFETY: We're reading f32 values from raw bytes.
-                            // This is safe because:
-                            // 1. PipeWire guarantees F32LE format when we requested it
-                            // 2. We're only reading, not writing
-                            // 3. The slice is properly aligned by PipeWire
+                            // Process in batches using stack buffer (no allocation)
                             let mut pushed_total = 0usize;
-                            let mut sample_buf = [0.0f32; 512]; // Stack buffer, no allocation
+                            let mut sample_buf = [0.0f32; RT_BATCH_SIZE];
                             let mut byte_offset = 0usize;
 
                             while byte_offset + 4 <= audio_bytes.len() {
-                                let batch_size =
-                                    ((audio_bytes.len() - byte_offset) / 4).min(sample_buf.len());
+                                let batch_bytes = &audio_bytes[byte_offset..];
+                                let batch_samples = (batch_bytes.len() / 4).min(RT_BATCH_SIZE);
 
-                                // Note: Using index loop here because we need both:
-                                // 1. Index for sample_buf assignment
-                                // 2. Calculated index into audio_bytes based on byte_offset
-                                #[allow(clippy::needless_range_loop)]
-                                for i in 0..batch_size {
-                                    let idx = byte_offset + i * 4;
-                                    if idx + 4 <= audio_bytes.len() {
-                                        let bytes: [u8; 4] = [
-                                            audio_bytes[idx],
-                                            audio_bytes[idx + 1],
-                                            audio_bytes[idx + 2],
-                                            audio_bytes[idx + 3],
-                                        ];
-                                        sample_buf[i] = f32::from_le_bytes(bytes);
-                                    }
-                                }
+                                // Convert bytes to f32 using common helper
+                                let converted = bytes_to_f32_samples(
+                                    &batch_bytes[..batch_samples * 4],
+                                    &mut sample_buf[..batch_samples],
+                                );
 
                                 // Push batch to ring buffer (lock-free, real-time safe)
-                                let pushed = user_data.producer.push(&sample_buf[..batch_size]);
+                                let pushed = user_data.producer.push(&sample_buf[..converted]);
                                 pushed_total += pushed;
 
-                                if pushed < batch_size {
+                                if pushed < converted {
                                     // Buffer full, stop processing this frame
                                     break;
                                 }
 
-                                byte_offset += batch_size * 4;
+                                byte_offset += converted * 4;
                             }
 
                             // Update sample counter (atomic, real-time safe)
@@ -611,7 +596,6 @@ fn run_capture_loop(
 
                             if pushed_total < num_samples {
                                 // Buffer overflow - samples dropped
-                                // Metrics are recorded internally by the producer
                                 trace!(
                                     dropped = num_samples - pushed_total,
                                     "capture buffer overflow"
@@ -628,32 +612,8 @@ fn run_capture_loop(
             PipeWireError::StreamCreationFailed(format!("failed to register listener: {}", e))
         })?;
 
-    // Build audio format parameters
-    let spa_format = match format.sample_format {
-        SampleFormat::F32 => spa::param::audio::AudioFormat::F32LE,
-        SampleFormat::I16 => spa::param::audio::AudioFormat::S16LE,
-        SampleFormat::I32 => spa::param::audio::AudioFormat::S32LE,
-        _ => spa::param::audio::AudioFormat::F32LE, // Default to F32
-    };
-
-    let mut audio_info = spa::param::audio::AudioInfoRaw::new();
-    audio_info.set_format(spa_format);
-    audio_info.set_rate(rate);
-    audio_info.set_channels(channels);
-
-    // Serialize audio format to POD
-    let values: Vec<u8> = pw::spa::pod::serialize::PodSerializer::serialize(
-        std::io::Cursor::new(Vec::new()),
-        &pw::spa::pod::Value::Object(pw::spa::pod::Object {
-            type_: pw::spa::sys::SPA_TYPE_OBJECT_Format,
-            id: pw::spa::sys::SPA_PARAM_EnumFormat,
-            properties: audio_info.into(),
-        }),
-    )
-    .map_err(|e| PipeWireError::Internal(format!("failed to serialize audio format: {:?}", e)))?
-    .0
-    .into_inner();
-
+    // Build audio format parameters using common helper
+    let values = build_audio_format_pod(format)?;
     let mut params = [Pod::from_bytes(&values)
         .ok_or_else(|| PipeWireError::Internal("failed to create format pod".to_string()))?];
 
@@ -681,23 +641,7 @@ fn run_capture_loop(
     info!(device = %device_id, "capture stream connected, entering main loop");
 
     // Set up a timer to check is_running flag periodically
-    // When is_running becomes false, we quit the main loop
-    let is_running_timer = Arc::clone(&is_running);
-    let mainloop_for_timer = mainloop.downgrade();
-    let _timer = mainloop.loop_().add_timer(move |_| {
-        if !is_running_timer.load(Ordering::Acquire) {
-            if let Some(ml) = mainloop_for_timer.upgrade() {
-                ml.quit();
-            }
-        }
-    });
-    _timer
-        .update_timer(
-            Some(std::time::Duration::from_millis(100)),
-            Some(std::time::Duration::from_millis(100)),
-        )
-        .into_result()
-        .map_err(|e| PipeWireError::Internal(format!("failed to set timer: {:?}", e)))?;
+    let _timer = setup_stop_timer(&mainloop, is_running, 100)?;
 
     // Run the main loop (blocks until quit)
     mainloop.run();
