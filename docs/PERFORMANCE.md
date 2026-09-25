@@ -73,7 +73,20 @@ Always document:
 
 ## Current Measurements
 
-> **Note**: No measurements available yet. This section will be updated as the project matures.
+### M1 demand-driven virtual source (2026-09-25)
+
+Environment: Ubuntu 24.04.5, x86_64, PipeWire 1.0.5, WirePlumber active,
+48 kHz stereo F32, default PipeWire quantum 1024.
+
+| Scenario | VM callbacks | Buffer | Result |
+|---|---:|---:|---|
+| No application consumer, 8 s | 0 | 0% | Capture drained/discarded; no overflow |
+| `pw-record` consumer, 10 s | 251-275 observed | 12.5-25% | Source linked and drained |
+
+The connected-consumer run was captured while validating callback demand; its
+requested-frame counter was then corrected to use negotiated SPA chunk size
+instead of backing-buffer capacity. A 60-second soak and post-correction
+measurement are still required before recording a stable baseline.
 
 ### Placeholder
 
