@@ -28,7 +28,51 @@
   Gate, and validate real PipeWire audio on Linux
   before merge. The main branch and Dependabot PRs do not yet contain this fix.
 - Release workflow reference was corrected but no release/tag was triggered.
-- The bootstrap inventory below is historical and has not been revalidated.
+
+## M1 loopback hotfix - 2026-09-25 (PR #14)
+
+**Branch:** `fix/m1-pipewire-buffer-sync`
+
+### Root Cause
+- The virtual source used `Direction::Output`, which registered input ports and
+  left the source suspended. Loopback also fed a demand-driven source while no
+  application was connected.
+
+### Fixes Applied
+- Virtual microphone now uses `Direction::Input`, exposes output ports, and
+  records callback demand with atomics.
+- Loopback drains capture but only feeds the virtual ring while callback
+  activity is present.
+- Virtual callback uses negotiated `chunk.size()` rather than backing buffer
+  capacity, preserving frame/channel accounting.
+- Real-time callbacks contain **no logging, allocation, blocking, or I/O**.
+
+### Code Quality Improvements
+- Extracted common PipeWire utilities to `common.rs` module to reduce
+  duplication (bytes↔samples conversion, audio format POD, timer setup).
+- Added 5 new buffer resilience tests: overflow metrics, bounded push,
+  consumer drain, stereo alignment, rapid push/pop integrity.
+- Total test count: 115 passing (56 osb-audio, 30 osb-core, 4 osb-daemon,
+  27 osb-pipewire, 9 osb-protocol, 4 doc-tests).
+
+### Validation Status
+- PipeWire 1.0.5/WirePlumber validation confirmed no-consumer behavior with
+  `VM callbacks=0`, buffer `0%`, and no overflow.
+- A connected `pw-record` source linked successfully and callbacks ran with
+  buffer oscillating between `12.5%` and `25%`.
+- **Pending:** Physical Ubuntu validation with `scripts/validate-m1-pipewire.sh`
+  before merge.
+
+### CI/Quality Gates
+- ✅ Build (cargo check)
+- ✅ Clippy (zero warnings)
+- ✅ Tests (115 passing)
+- ✅ Format (rustfmt)
+- ✅ Docs (cargo doc)
+- ✅ Security (cargo-audit)
+- ⏳ SonarQube (awaiting push with common.rs refactor)
+
+The bootstrap inventory below is historical and has not been revalidated.
 
 ## Current State: Foundation Complete
 

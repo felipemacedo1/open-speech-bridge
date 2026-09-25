@@ -3,6 +3,7 @@
 //! This module provides the actual PipeWire integration for Linux systems.
 
 mod capture;
+mod common;
 mod context;
 mod playback;
 mod virtual_device;
@@ -11,7 +12,8 @@ pub use capture::{CaptureStream, CaptureStreamBuilder};
 pub use context::PipeWireContext;
 pub use playback::{PlaybackStream, PlaybackStreamBuilder};
 pub use virtual_device::{
-    VirtualMicrophone, VirtualSink, DEFAULT_VIRTUAL_MIC_NAME, DEFAULT_VIRTUAL_SINK_NAME,
+    VirtualMicMetricsSnapshot, VirtualMicrophone, VirtualSink, DEFAULT_VIRTUAL_MIC_NAME,
+    DEFAULT_VIRTUAL_SINK_NAME,
 };
 
 use std::process::Command;
