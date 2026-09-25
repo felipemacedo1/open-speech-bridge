@@ -2,6 +2,23 @@
 
 > Last updated: 2024-12-XX (Initial Bootstrap)
 
+## CI repair audit — 2026-09-24
+
+- PR #11: corrected five CI toolchain references and the release reference from
+  the nonexistent `dtolnay/rust-action` to `dtolnay/rust-toolchain@stable`.
+- Verified the replacement action exists through the GitHub API. The preceding
+  CI run (36055040709) failed during setup; only Security Audit passed.
+- Validation of the corrected workflow is pending the next GitHub Actions run.
+  No local Rust build/test claim is made: Rust is unavailable and no development
+  container is running in this checkout.
+- SonarQube remains an unmet merge requirement: no scanner configuration or
+  Sonar check was found, and the repository Actions secrets list is empty.
+- PR #11 still requires real PipeWire/audio validation before merge; its reported
+  103 passing tests are prior author evidence, not reproduced in this audit.
+- Next: inspect the new CI results, configure the intended Sonar project and
+  credentials, then validate the microphone-to-virtual-microphone path on Linux.
+- The bootstrap inventory below is historical and has not been revalidated.
+
 ## Current State: Foundation Complete
 
 The project infrastructure is in place. Core Rust crates are defined with types, errors, and basic implementations. Docker development environment is configured.
