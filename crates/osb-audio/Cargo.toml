@@ -11,7 +11,7 @@ repository.workspace = true
 osb-core.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-ringbuf.workspace = true
+rtrb.workspace = true
 rubato.workspace = true
 
 [dev-dependencies]

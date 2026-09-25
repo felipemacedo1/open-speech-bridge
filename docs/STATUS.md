@@ -2,6 +2,34 @@
 
 > Last updated: 2024-12-XX (Initial Bootstrap)
 
+## CI repair audit — 2026-09-24
+
+- PR #11: corrected five CI toolchain references and the release reference to
+  `dtolnay/rust-toolchain@stable`; derived audio enum defaults without changing
+  F32/Stereo defaults; removed an unused capture-state mirror and its own test.
+- GitHub Actions run [36080014937](https://github.com/felipemacedo1/open-speech-bridge/actions/runs/36080014937)
+  passed all six jobs on commit `7a5b134`: Check, Test, Clippy, Format,
+  Documentation and Security Audit.
+- `cargo test --workspace` in that run: 102 unit tests and 4 doctests passed;
+  11 unit tests and 4 doctests were ignored. Ignored tests are not audio evidence.
+- Local Docker (Debian 12, Rust 1.87.0): `cargo build`, `cargo fmt --check`,
+  `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings`
+  passed. Local tests reproduced 102 unit tests + 4 doctests passing and 15 ignored.
+- CLI `doctor`, `devices`, and `loopback --help` executed in Docker. No PipeWire
+  daemon or WirePlumber is available there; device listing was empty. This does
+  not validate real microphone capture or audio routing.
+- SonarQube Cloud project `felipemacedo1_open-speech-bridge` in organization
+  `felipemacedo1` is confirmed. The new workflow imports Clippy JSON and waits
+  for the Quality Gate. `SONAR_TOKEN` is registered as an Actions secret.
+  Authenticated run 36082523834 completed analysis at `f27f55b`; the gate
+  failed on new duplicated lines (30.5%, limit 3%). Three critical complexity
+  code smells remain in capture.rs and virtual_device.rs. See SONARQUBE.md.
+- Next: refactor the Sonar duplication/complexity findings, pass the Quality
+  Gate, and validate real PipeWire audio on Linux
+  before merge. The main branch and Dependabot PRs do not yet contain this fix.
+- Release workflow reference was corrected but no release/tag was triggered.
+- The bootstrap inventory below is historical and has not been revalidated.
+
 ## Current State: Foundation Complete
 
 The project infrastructure is in place. Core Rust crates are defined with types, errors, and basic implementations. Docker development environment is configured.
