@@ -40,35 +40,6 @@ use tracing::{debug, error, info, trace, warn};
 /// Default buffer size in frames for capture streams.
 const DEFAULT_BUFFER_FRAMES: u32 = 4096;
 
-/// Stream state values (mirrors PipeWire stream states).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u32)]
-pub enum StreamState {
-    /// Stream is in error state.
-    Error = 0,
-    /// Stream is unconnected.
-    Unconnected = 1,
-    /// Stream is connecting.
-    Connecting = 2,
-    /// Stream is paused.
-    Paused = 3,
-    /// Stream is actively streaming.
-    Streaming = 4,
-}
-
-impl From<u32> for StreamState {
-    fn from(value: u32) -> Self {
-        match value {
-            0 => StreamState::Error,
-            1 => StreamState::Unconnected,
-            2 => StreamState::Connecting,
-            3 => StreamState::Paused,
-            4 => StreamState::Streaming,
-            _ => StreamState::Error,
-        }
-    }
-}
-
 /// Audio capture stream for recording from a PipeWire device.
 ///
 /// # Architecture
@@ -819,16 +790,6 @@ impl CaptureStreamBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_stream_state_conversion() {
-        assert_eq!(StreamState::from(0), StreamState::Error);
-        assert_eq!(StreamState::from(1), StreamState::Unconnected);
-        assert_eq!(StreamState::from(2), StreamState::Connecting);
-        assert_eq!(StreamState::from(3), StreamState::Paused);
-        assert_eq!(StreamState::from(4), StreamState::Streaming);
-        assert_eq!(StreamState::from(99), StreamState::Error);
-    }
 
     #[test]
     fn test_builder_defaults() {
