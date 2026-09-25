@@ -18,9 +18,10 @@
 - CLI `doctor`, `devices`, and `loopback --help` executed in Docker. No PipeWire
   daemon or WirePlumber is available there; device listing was empty. This does
   not validate real microphone capture or audio routing.
-- SonarQube remains an unmet merge requirement: no scanner configuration or
-  Sonar check was found, and the repository Actions secrets list is empty.
-  The intended server/project and credential provisioning remain undecided.
+- SonarQube Cloud project `felipemacedo1_open-speech-bridge` in organization
+  `felipemacedo1` is confirmed. The new workflow imports Clippy JSON and waits
+  for the Quality Gate. `SONAR_TOKEN` is registered as an Actions secret.
+  Authenticated analysis is pending; the project had no baseline analysis.
 - Next: obtain a Sonar Quality Gate and validate real PipeWire audio on Linux
   before merge. The main branch and Dependabot PRs do not yet contain this fix.
 - Release workflow reference was corrected but no release/tag was triggered.
