@@ -38,7 +38,7 @@ use pw::spa;
 use pw::spa::pod::Pod;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, info, warn};
 
 /// Default buffer size in frames for capture streams.
 const DEFAULT_BUFFER_FRAMES: u32 = 4096;
@@ -560,7 +560,7 @@ fn run_capture_loop(
                         // Bounds check
                         if offset + size <= slice.len() {
                             let audio_bytes = &slice[offset..offset + size];
-                            let num_samples = audio_bytes.len() / 4;
+                            let _num_samples = audio_bytes.len() / 4;
 
                             // Process in batches using stack buffer (no allocation)
                             let mut pushed_total = 0usize;
@@ -594,13 +594,8 @@ fn run_capture_loop(
                                 .samples_captured
                                 .fetch_add(pushed_total as u64, Ordering::Relaxed);
 
-                            if pushed_total < num_samples {
-                                // Buffer overflow - samples dropped
-                                trace!(
-                                    dropped = num_samples - pushed_total,
-                                    "capture buffer overflow"
-                                );
-                            }
+                            // Note: overflow metrics are tracked internally by the producer
+                            // No logging here to maintain RT safety
                         }
                     }
                 }
