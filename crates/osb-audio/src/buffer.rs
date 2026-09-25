@@ -20,7 +20,6 @@
 
 use osb_core::metrics::{AudioMetrics, BufferOccupancy};
 use std::sync::Arc;
-use tracing::{debug, warn};
 
 /// A simple audio buffer for temporary storage.
 #[derive(Debug, Clone)]
@@ -225,7 +224,8 @@ impl AudioRingProducer {
     /// Number of samples actually written. May be less than input if buffer is full.
     pub fn push(&mut self, samples: &[f32]) -> usize {
         let slots = self.inner.slots();
-        let to_write = samples.len().min(slots);
+        let channels = self.shared.channels as usize;
+        let to_write = (samples.len().min(slots) / channels) * channels;
 
         if to_write > 0 {
             // Use write_chunk for efficient bulk copy
@@ -250,10 +250,6 @@ impl AudioRingProducer {
             let dropped_samples = samples.len() - to_write;
             let dropped_frames = dropped_samples / self.shared.channels as usize;
             self.local_dropped += dropped_frames as u64;
-            warn!(
-                dropped_frames = dropped_frames,
-                "audio buffer overflow - frames dropped"
-            );
         }
 
         to_write
@@ -339,7 +335,8 @@ impl AudioRingConsumer {
     /// Number of samples actually read. May be less than buffer size if not enough data.
     pub fn pop(&mut self, output: &mut [f32]) -> usize {
         let available = self.inner.slots();
-        let to_read = output.len().min(available);
+        let channels = self.shared.channels as usize;
+        let to_read = (output.len().min(available) / channels) * channels;
 
         if to_read > 0 {
             if let Ok(chunk) = self.inner.read_chunk(to_read) {
@@ -361,7 +358,6 @@ impl AudioRingConsumer {
 
         if to_read < output.len() && to_read == 0 {
             self.shared.metrics.record_underrun();
-            debug!("audio buffer underrun");
         }
 
         to_read
@@ -380,9 +376,6 @@ impl AudioRingConsumer {
         if read < output.len() {
             // Fill remaining with silence
             output[read..].fill(0.0);
-            if read == 0 {
-                debug!("audio buffer underrun - filled with silence");
-            }
         }
 
         read
@@ -559,6 +552,43 @@ mod tests {
         let input = vec![1.0f32; 128];
         let written = prod.push(&input);
         assert!(written < 128); // Should overflow
+    }
+
+    #[test]
+    fn test_ring_buffer_stays_bounded_when_consumer_is_absent() {
+        let (mut prod, _cons) = AudioRingBuffer::new(8, 2);
+        let input = vec![1.0f32; 32];
+
+        for _ in 0..10 {
+            prod.push(&input);
+        }
+
+        assert_eq!(prod.occupancy().current_frames, 8);
+        assert_eq!(prod.available_frames(), 0);
+    }
+
+    #[test]
+    fn test_ring_buffer_consumer_can_resume_after_overflow() {
+        let (mut prod, mut cons) = AudioRingBuffer::new(8, 2);
+        let input = vec![1.0f32; 16];
+        prod.push(&input);
+
+        let mut output = vec![0.0f32; 8];
+        assert_eq!(cons.pop(&mut output), 8);
+        assert_eq!(cons.occupancy().current_frames, 4);
+
+        prod.push(&input[..8]);
+        assert_eq!(cons.occupancy().current_frames, 8);
+    }
+
+    #[test]
+    fn test_ring_buffer_preserves_interleaved_frames() {
+        let (mut prod, mut cons) = AudioRingBuffer::new(4, 2);
+        assert_eq!(prod.push(&[1.0, 2.0, 3.0]), 2);
+
+        let mut output = [0.0; 4];
+        assert_eq!(cons.pop(&mut output), 2);
+        assert_eq!(&output[..2], &[1.0, 2.0]);
     }
 
     #[test]

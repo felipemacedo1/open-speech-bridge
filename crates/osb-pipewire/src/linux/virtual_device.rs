@@ -40,12 +40,37 @@ use pipewire as pw;
 use pw::properties::properties;
 use pw::spa;
 use pw::spa::pod::Pod;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 /// Default buffer size in frames for virtual devices.
 const DEFAULT_BUFFER_FRAMES: u32 = 4096;
+
+/// Callback and demand counters for a virtual microphone.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct VirtualMicMetricsSnapshot {
+    pub callbacks: u64,
+    pub frames_requested: u64,
+    pub frames_consumed: u64,
+}
+
+#[derive(Debug, Default)]
+struct VirtualMicMetrics {
+    callbacks: AtomicU64,
+    frames_requested: AtomicU64,
+    frames_consumed: AtomicU64,
+}
+
+impl VirtualMicMetrics {
+    fn snapshot(&self) -> VirtualMicMetricsSnapshot {
+        VirtualMicMetricsSnapshot {
+            callbacks: self.callbacks.load(Ordering::Relaxed),
+            frames_requested: self.frames_requested.load(Ordering::Relaxed),
+            frames_consumed: self.frames_consumed.load(Ordering::Relaxed),
+        }
+    }
+}
 
 /// A virtual microphone that appears as an audio input device.
 ///
@@ -86,6 +111,7 @@ pub struct VirtualMicrophone {
     is_running: Arc<AtomicBool>,
     /// PipeWire node ID when registered (set after stream creation).
     node_id: Arc<AtomicU32>,
+    metrics: Arc<VirtualMicMetrics>,
     /// Thread handle for the PipeWire main loop.
     thread_handle: Option<std::thread::JoinHandle<()>>,
     /// Consumer for stub mode (before start). None after start().
@@ -153,6 +179,7 @@ impl VirtualMicrophone {
             format,
             is_running: Arc::new(AtomicBool::new(false)),
             node_id: Arc::new(AtomicU32::new(0)),
+            metrics: Arc::new(VirtualMicMetrics::default()),
             thread_handle: None,
             stub_consumer: Some(consumer),
         };
@@ -190,6 +217,11 @@ impl VirtualMicrophone {
     #[inline]
     pub fn is_running(&self) -> bool {
         self.is_running.load(Ordering::Acquire)
+    }
+
+    /// Return callback demand observed by the virtual microphone.
+    pub fn metrics(&self) -> VirtualMicMetricsSnapshot {
+        self.metrics.snapshot()
     }
 
     /// Start the virtual microphone.
@@ -235,6 +267,7 @@ impl VirtualMicrophone {
         // Clone shared state for the thread
         let is_running = Arc::clone(&self.is_running);
         let node_id = Arc::clone(&self.node_id);
+        let metrics = Arc::clone(&self.metrics);
         let name = self.name.clone();
         let format = self.format;
 
@@ -242,7 +275,9 @@ impl VirtualMicrophone {
         let handle = std::thread::Builder::new()
             .name(format!("pw-vmic-{}", name))
             .spawn(move || {
-                if let Err(e) = run_virtual_mic_loop(consumer, &name, format, is_running, node_id) {
+                if let Err(e) =
+                    run_virtual_mic_loop(consumer, &name, format, is_running, node_id, metrics)
+                {
                     error!(name = %name, error = %e, "virtual mic loop failed");
                 }
             })
@@ -342,6 +377,7 @@ impl VirtualMicrophone {
 struct VirtualMicUserData {
     /// Lock-free ring buffer consumer for audio samples.
     consumer: AudioRingConsumer,
+    metrics: Arc<VirtualMicMetrics>,
 }
 
 /// Run the PipeWire virtual microphone loop in a dedicated thread.
@@ -356,7 +392,7 @@ struct VirtualMicUserData {
 /// 2. Creates a `Context` and connects to PipeWire daemon
 /// 3. Creates a `Stream` with virtual audio source properties
 /// 4. Registers a real-time safe `process` callback
-/// 5. Connects with `Direction::Output` to provide audio
+/// 5. Connects with `Direction::Input` so the stream provides source audio
 /// 6. Runs the main loop until `is_running` is set to false
 ///
 /// # Real-time Safety
@@ -370,6 +406,7 @@ fn run_virtual_mic_loop(
     format: AudioFormat,
     is_running: Arc<AtomicBool>,
     node_id: Arc<AtomicU32>,
+    metrics: Arc<VirtualMicMetrics>,
 ) -> Result<()> {
     // Initialize PipeWire for this thread
     pw::init();
@@ -416,7 +453,7 @@ fn run_virtual_mic_loop(
     })?;
 
     // Prepare user data for callbacks
-    let user_data = VirtualMicUserData { consumer };
+    let user_data = VirtualMicUserData { consumer, metrics };
 
     // Clone references for callbacks
     let mainloop_weak = mainloop.downgrade();
@@ -446,47 +483,67 @@ fn run_virtual_mic_loop(
                 _ => {}
             }
         })
-        .process(|stream, user_data| {
+        .process(move |stream, user_data| {
             // REAL-TIME SAFE CALLBACK
             // This runs in PipeWire's real-time audio thread.
             // Only lock-free operations allowed here.
 
             if let Some(mut buffer) = stream.dequeue_buffer() {
+                user_data.metrics.callbacks.fetch_add(1, Ordering::Relaxed);
                 let datas = buffer.datas_mut();
                 if let Some(data) = datas.first_mut() {
+                    let offset = data.chunk().offset() as usize;
+                    let size = data.chunk().size() as usize;
                     if let Some(slice) = data.data() {
-                        // Calculate how many samples we can write
-                        let num_samples = slice.len() / 4; // 4 bytes per f32
+                        if offset + size > slice.len() {
+                            return;
+                        }
+                        let output = &mut slice[offset..offset + size];
+                        // The chunk size is the negotiated quantum. The backing
+                        // slice can be larger and must not be treated as audio.
+                        let num_samples = output.len() / 4;
 
                         // Use a stack buffer to read from ring buffer
                         // Then convert to bytes for PipeWire
                         let mut sample_buf = [0.0f32; 512]; // Stack buffer, no allocation
                         let mut byte_offset = 0usize;
+                        let mut frames_requested = 0u64;
+                        let mut frames_consumed = 0u64;
 
-                        while byte_offset + 4 <= slice.len() {
+                        while byte_offset + 4 <= output.len() {
                             let batch_samples =
-                                ((slice.len() - byte_offset) / 4).min(sample_buf.len());
+                                ((output.len() - byte_offset) / 4).min(sample_buf.len());
+                            frames_requested += (batch_samples / channels as usize) as u64;
 
                             // Read from ring buffer (lock-free, real-time safe)
                             // pop_or_silence fills with zeros if buffer is empty
-                            let _read = user_data
+                            let read = user_data
                                 .consumer
                                 .pop_or_silence(&mut sample_buf[..batch_samples]);
+                            frames_consumed += (read / channels as usize) as u64;
 
                             // Convert f32 samples to F32LE bytes
                             for (i, &sample) in sample_buf[..batch_samples].iter().enumerate() {
                                 let bytes = sample.to_le_bytes();
                                 let idx = byte_offset + i * 4;
-                                if idx + 4 <= slice.len() {
-                                    slice[idx] = bytes[0];
-                                    slice[idx + 1] = bytes[1];
-                                    slice[idx + 2] = bytes[2];
-                                    slice[idx + 3] = bytes[3];
+                                if idx + 4 <= output.len() {
+                                    output[idx] = bytes[0];
+                                    output[idx + 1] = bytes[1];
+                                    output[idx + 2] = bytes[2];
+                                    output[idx + 3] = bytes[3];
                                 }
                             }
 
                             byte_offset += batch_samples * 4;
                         }
+                        user_data
+                            .metrics
+                            .frames_requested
+                            .fetch_add(frames_requested, Ordering::Relaxed);
+                        user_data
+                            .metrics
+                            .frames_consumed
+                            .fetch_add(frames_consumed, Ordering::Relaxed);
 
                         // Update chunk metadata to indicate how much data we wrote
                         let chunk = data.chunk_mut();
@@ -532,10 +589,12 @@ fn run_virtual_mic_loop(
     let mut params = [Pod::from_bytes(&values)
         .ok_or_else(|| PipeWireError::Internal("failed to create format pod".to_string()))?];
 
-    // Connect the stream (Direction::Output for providing audio to apps)
+    // A PipeWire source stream has output ports. In pipewire-rs this is
+    // created by connecting the stream with Direction::Input; Direction::Output
+    // would create input ports and leave the advertised source suspended.
     stream
         .connect(
-            spa::utils::Direction::Output,
+            spa::utils::Direction::Input,
             None, // No specific target, apps will connect to us
             pw::stream::StreamFlags::AUTOCONNECT
                 | pw::stream::StreamFlags::MAP_BUFFERS

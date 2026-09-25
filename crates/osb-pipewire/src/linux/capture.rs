@@ -98,6 +98,7 @@ pub struct CaptureStream {
     device_disconnected: Arc<AtomicBool>,
     /// Samples captured counter (atomic for cross-thread access).
     samples_captured: Arc<AtomicU64>,
+    callbacks: Arc<AtomicU64>,
     /// Handle to the PipeWire thread (for cleanup).
     thread_handle: Option<std::thread::JoinHandle<()>>,
     /// Producer for manual sample injection (testing/stub mode).
@@ -167,6 +168,7 @@ impl CaptureStream {
             is_running: Arc::new(AtomicBool::new(false)),
             device_disconnected: Arc::new(AtomicBool::new(false)),
             samples_captured: Arc::new(AtomicU64::new(0)),
+            callbacks: Arc::new(AtomicU64::new(0)),
             thread_handle: None,
             stub_producer: Some(producer),
         };
@@ -209,6 +211,7 @@ impl CaptureStream {
             is_running: Arc::new(AtomicBool::new(false)),
             device_disconnected: Arc::new(AtomicBool::new(false)),
             samples_captured: Arc::new(AtomicU64::new(0)),
+            callbacks: Arc::new(AtomicU64::new(0)),
             thread_handle: None,
             stub_producer: Some(producer),
         };
@@ -247,6 +250,12 @@ impl CaptureStream {
     #[inline]
     pub fn samples_captured(&self) -> u64 {
         self.samples_captured.load(Ordering::Relaxed)
+    }
+
+    /// Get the number of PipeWire process callbacks observed.
+    #[inline]
+    pub fn callbacks(&self) -> u64 {
+        self.callbacks.load(Ordering::Relaxed)
     }
 
     /// Start capturing audio with real PipeWire stream.
@@ -289,6 +298,7 @@ impl CaptureStream {
         let is_running = Arc::clone(&self.is_running);
         let device_disconnected = Arc::clone(&self.device_disconnected);
         let samples_captured = Arc::clone(&self.samples_captured);
+        let callbacks = Arc::clone(&self.callbacks);
         let device_id = self.device_id.clone();
         let format = self.format;
 
@@ -303,6 +313,7 @@ impl CaptureStream {
                     is_running,
                     device_disconnected,
                     samples_captured,
+                    callbacks,
                 ) {
                     error!(device = %device_id, error = %e, "capture loop failed");
                 }
@@ -418,6 +429,7 @@ struct CaptureUserData {
     producer: AudioRingProducer,
     /// Atomic counter for samples captured (shared with CaptureStream).
     samples_captured: Arc<AtomicU64>,
+    callbacks: Arc<AtomicU64>,
 }
 
 /// Run the PipeWire capture loop in a dedicated thread.
@@ -448,6 +460,7 @@ fn run_capture_loop(
     is_running: Arc<AtomicBool>,
     device_disconnected: Arc<AtomicBool>,
     samples_captured: Arc<AtomicU64>,
+    callbacks: Arc<AtomicU64>,
 ) -> Result<()> {
     // Initialize PipeWire for this thread
     pw::init();
@@ -494,6 +507,7 @@ fn run_capture_loop(
     let user_data = CaptureUserData {
         producer,
         samples_captured: Arc::clone(&samples_captured),
+        callbacks,
     };
 
     // Clone references for callbacks
@@ -531,6 +545,7 @@ fn run_capture_loop(
             // Only lock-free operations allowed here.
 
             if let Some(mut buffer) = stream.dequeue_buffer() {
+                user_data.callbacks.fetch_add(1, Ordering::Relaxed);
                 let datas = buffer.datas_mut();
                 if let Some(data) = datas.first_mut() {
                     // Read chunk info first (immutable borrow)
