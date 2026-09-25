@@ -753,4 +753,88 @@ mod tests {
             assert_eq!(sample, i as f32);
         }
     }
+
+    /// Test that buffer doesn't grow when pushed continuously without consumption.
+    /// This simulates the "no consumer connected" scenario in loopback.
+    #[test]
+    fn test_continuous_push_without_consumer_stays_bounded() {
+        let (mut prod, _cons) = AudioRingBuffer::new(64, 2);
+
+        // Simulate continuous audio capture (e.g., 100 callbacks worth of data)
+        for _ in 0..100 {
+            let samples = vec![0.5f32; 128]; // 64 frames per callback
+            prod.push(&samples);
+        }
+
+        // Buffer should never exceed capacity
+        let occ = prod.occupancy();
+        assert!(occ.current_frames <= 64);
+        assert!(occ.fill_ratio <= 1.0);
+    }
+
+    /// Test overflow metrics are tracked correctly when producer outpaces consumer.
+    #[test]
+    fn test_overflow_metrics_tracked() {
+        let (mut prod, _cons) = AudioRingBuffer::new(10, 1);
+
+        // Push more than capacity
+        prod.push(&[1.0; 15]);
+        prod.flush_metrics();
+
+        // Should have received 10 frames and dropped 5
+        let metrics = prod.occupancy();
+        assert_eq!(metrics.current_frames, 10);
+    }
+
+    /// Test consumer can drain buffer after producer stops.
+    #[test]
+    fn test_consumer_drains_after_producer_stops() {
+        let (mut prod, mut cons) = AudioRingBuffer::new(100, 2);
+
+        // Producer writes some data
+        prod.push(&[1.0; 50]); // 25 frames
+        drop(prod); // Producer stops
+
+        // Consumer can still drain
+        let mut output = vec![0.0; 50];
+        let read = cons.pop(&mut output);
+        assert_eq!(read, 50);
+        assert_eq!(cons.available_frames(), 0);
+    }
+
+    /// Test stereo frame alignment with odd sample count.
+    #[test]
+    fn test_stereo_frame_alignment_odd_samples() {
+        let (mut prod, mut cons) = AudioRingBuffer::new(10, 2);
+
+        // Push 5 samples (2.5 frames) - should only write 4 (2 frames)
+        let written = prod.push(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+        assert_eq!(written, 4); // Only complete frames
+
+        // Should have exactly 2 frames
+        assert_eq!(cons.available_frames(), 2);
+
+        // Pop with odd request - should only read complete frames
+        let mut output = vec![0.0; 5];
+        let read = cons.pop(&mut output);
+        assert_eq!(read, 4);
+        assert_eq!(&output[..4], &[1.0, 2.0, 3.0, 4.0]);
+    }
+
+    /// Test rapid push/pop cycles maintain data integrity.
+    #[test]
+    fn test_rapid_push_pop_data_integrity() {
+        let (mut prod, mut cons) = AudioRingBuffer::new(32, 2);
+
+        for cycle in 0..50 {
+            let base = (cycle * 4) as f32;
+            let input = [base, base + 1.0, base + 2.0, base + 3.0];
+            prod.push(&input);
+
+            let mut output = [0.0f32; 4];
+            let read = cons.pop(&mut output);
+            assert_eq!(read, 4);
+            assert_eq!(output, input);
+        }
+    }
 }
