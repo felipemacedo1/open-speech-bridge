@@ -21,8 +21,11 @@
 - SonarQube Cloud project `felipemacedo1_open-speech-bridge` in organization
   `felipemacedo1` is confirmed. The new workflow imports Clippy JSON and waits
   for the Quality Gate. `SONAR_TOKEN` is registered as an Actions secret.
-  Authenticated analysis is pending; the project had no baseline analysis.
-- Next: obtain a Sonar Quality Gate and validate real PipeWire audio on Linux
+  Authenticated run 36082523834 completed analysis at `f27f55b`; the gate
+  failed on new duplicated lines (30.5%, limit 3%). Three critical complexity
+  code smells remain in capture.rs and virtual_device.rs. See SONARQUBE.md.
+- Next: refactor the Sonar duplication/complexity findings, pass the Quality
+  Gate, and validate real PipeWire audio on Linux
   before merge. The main branch and Dependabot PRs do not yet contain this fix.
 - Release workflow reference was corrected but no release/tag was triggered.
 - The bootstrap inventory below is historical and has not been revalidated.

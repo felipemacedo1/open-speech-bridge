@@ -13,8 +13,9 @@ Project: [open-speech-bridge](https://sonarcloud.io/dashboard?id=felipemacedo1_o
 2. Create a Sonar token authorized to analyze this project and save it as the
    repository Actions secret `SONAR_TOKEN`. Never commit or paste the token into
    an issue, PR, log, or documentation.
-3. Run an analysis of `main` to establish the base branch, then analyze PRs.
-   A newly created project may reject PR analysis until its base is analyzed.
+3. Analyze PRs through the workflow. Pushes to `main` will establish and update
+   its baseline after the workflow is merged. The first PR analysis succeeded
+   even though this project had no prior `main` analysis.
 
 The workflow analyzes pushes to `main`, same-repository PRs and manual runs.
 It imports a Clippy JSON report and waits up to 300 seconds for the Quality Gate.
@@ -29,9 +30,32 @@ Real PipeWire validation remains a separate requirement before merge.
 ## Validation evidence
 
 The public project and organization were verified through the Sonar API on
-2026-09-24. It had no analyses at setup time. Scanner authentication, report
-import and the Quality Gate require a real authenticated workflow run; static
-workflow validation alone does not establish them.
+2026-09-24. The `SONAR_TOKEN` Actions secret was configured, and authenticated
+run [36082523834](https://github.com/felipemacedo1/open-speech-bridge/actions/runs/36082523834)
+analyzed PR #11 at commit `f27f55b`. Clippy JSON import and Rust analysis completed.
+The workflow correctly failed when Sonar returned a failed Quality Gate.
+
+Results for new code:
+
+| Condition | Actual | Limit | Result |
+| --- | --- | --- | --- |
+| Duplicated lines | 30.5% | <= 3% | Failed |
+| Reliability rating | A | A | Passed |
+| Security rating | A | A | Passed |
+| Maintainability rating | A | A | Passed |
+| Security hotspots reviewed | 100% | 100% | Passed |
+
+Duplication is concentrated in `linux/capture.rs` (171 new duplicated lines,
+22.27%) and `linux/virtual_device.rs` (517, 53.63%). There are also three open
+`rust:S3776` findings, all marked critical code smells: cognitive complexity
+62 at `capture.rs:444`, 38 at `virtual_device.rs:367`, and 53 at
+`virtual_device.rs:825`, against the rule limit of 30. These require a scoped
+refactor with real-time safety preserved; no findings were dismissed and no
+Quality Gate thresholds were relaxed.
+
+The next code task is to inspect and consolidate these repeated stream setup
+and processing paths, with regression tests and performance measurements for
+any change affecting audio callbacks. Real PipeWire validation is still pending.
 
 ## References
 
