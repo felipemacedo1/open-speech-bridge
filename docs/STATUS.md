@@ -4,19 +4,26 @@
 
 ## CI repair audit — 2026-09-24
 
-- PR #11: corrected five CI toolchain references and the release reference from
-  the nonexistent `dtolnay/rust-action` to `dtolnay/rust-toolchain@stable`.
-- Verified the replacement action exists through the GitHub API. The preceding
-  CI run (36055040709) failed during setup; only Security Audit passed.
-- Validation of the corrected workflow is pending the next GitHub Actions run.
-  No local Rust build/test claim is made: Rust is unavailable and no development
-  container is running in this checkout.
+- PR #11: corrected five CI toolchain references and the release reference to
+  `dtolnay/rust-toolchain@stable`; derived audio enum defaults without changing
+  F32/Stereo defaults; removed an unused capture-state mirror and its own test.
+- GitHub Actions run [36080014937](https://github.com/felipemacedo1/open-speech-bridge/actions/runs/36080014937)
+  passed all six jobs on commit `7a5b134`: Check, Test, Clippy, Format,
+  Documentation and Security Audit.
+- `cargo test --workspace` in that run: 102 unit tests and 4 doctests passed;
+  11 unit tests and 4 doctests were ignored. Ignored tests are not audio evidence.
+- Local Docker (Debian 12, Rust 1.87.0): `cargo build`, `cargo fmt --check`,
+  `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings`
+  passed. Local tests reproduced 102 unit tests + 4 doctests passing and 15 ignored.
+- CLI `doctor`, `devices`, and `loopback --help` executed in Docker. No PipeWire
+  daemon or WirePlumber is available there; device listing was empty. This does
+  not validate real microphone capture or audio routing.
 - SonarQube remains an unmet merge requirement: no scanner configuration or
   Sonar check was found, and the repository Actions secrets list is empty.
-- PR #11 still requires real PipeWire/audio validation before merge; its reported
-  103 passing tests are prior author evidence, not reproduced in this audit.
-- Next: inspect the new CI results, configure the intended Sonar project and
-  credentials, then validate the microphone-to-virtual-microphone path on Linux.
+  The intended server/project and credential provisioning remain undecided.
+- Next: obtain a Sonar Quality Gate and validate real PipeWire audio on Linux
+  before merge. The main branch and Dependabot PRs do not yet contain this fix.
+- Release workflow reference was corrected but no release/tag was triggered.
 - The bootstrap inventory below is historical and has not been revalidated.
 
 ## Current State: Foundation Complete
