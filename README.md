@@ -10,21 +10,21 @@
 [![Documentation](https://docs.rs/openspeechbridge/badge.svg)](https://docs.rs/openspeechbridge)
 -->
 
-**Local-first real-time speech-to-speech translation runtime for desktop voice conversations.**
+**Experimental open-source project exploring local-first speech translation for desktop voice conversations.**
 
-OpenSpeechBridge captures audio from your microphone, translates it in real-time, and outputs translated speech through a virtual microphone that any application can use — Discord, Zoom, Google Meet, games, or any voice chat software.
+OpenSpeechBridge is being built to capture microphone audio, process speech through replaceable engines, and route translated audio to a virtual microphone that desktop applications can use. The end-to-end translation flow is not complete yet.
 
 ## What is OpenSpeechBridge?
 
-OpenSpeechBridge is an **engine-agnostic speech translation runtime**. It handles the hard parts of real-time audio:
+OpenSpeechBridge is a personal open-source project for learning and experimenting with an **engine-agnostic speech translation runtime**. The current implementation focuses on the audio/runtime foundation:
 
-- 🎤 Capturing audio from your microphone via PipeWire
+- 🎤 Building microphone capture through PipeWire
 - 🔄 Managing bounded buffers and backpressure
-- 🎯 Routing translated audio to a virtual microphone
-- 📊 Measuring latency and performance
-- 🔌 Supporting pluggable speech/translation engines
+- 🎯 Building virtual-microphone routing
+- 📊 Adding ways to observe latency, drops and buffer behavior
+- 🔌 Defining interfaces for replaceable speech/translation engines
 
-**Models are replaceable engines. The runtime is the product.**
+**Design direction:** models should remain replaceable engines, while the project explores the runtime that connects them.
 
 ## Current Status
 
