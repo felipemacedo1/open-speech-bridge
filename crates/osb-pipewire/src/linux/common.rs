@@ -12,12 +12,120 @@ use crate::error::{PipeWireError, Result};
 use osb_core::audio::{AudioFormat, SampleFormat};
 use pipewire as pw;
 use pw::spa;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// Stack buffer size for batch processing in real-time callbacks.
 /// 512 samples provides a good balance between efficiency and stack usage.
 pub const RT_BATCH_SIZE: usize = 512;
+
+/// Aggregate signal-level diagnostics collected without logging in callbacks.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SignalMetricsSnapshot {
+    pub samples: u64,
+    pub rms: f64,
+    pub peak: f32,
+    pub nonzero: u64,
+}
+
+/// Lock-free, single-writer signal accumulator for real-time callbacks.
+///
+/// Each instance has exactly one callback writer. Snapshots may observe fields
+/// from adjacent callback updates, which is acceptable for diagnostics and
+/// avoids locks or retry loops in the real-time path.
+#[derive(Debug, Default)]
+pub(crate) struct SignalMetrics {
+    samples: AtomicU64,
+    sum_squares_bits: AtomicU64,
+    peak_bits: AtomicU32,
+    nonzero: AtomicU64,
+}
+
+impl SignalMetrics {
+    #[inline]
+    pub(crate) fn record(&self, samples: &[f32]) {
+        let mut sum_squares = 0.0f64;
+        let mut peak = 0.0f32;
+        let mut nonzero = 0u64;
+
+        for &sample in samples {
+            let magnitude = sample.abs();
+            sum_squares += f64::from(sample) * f64::from(sample);
+            if magnitude > peak {
+                peak = magnitude;
+            }
+            if sample != 0.0 {
+                nonzero += 1;
+            }
+        }
+
+        self.record_aggregate(samples.len() as u64, sum_squares, peak, nonzero);
+    }
+
+    #[inline]
+    pub(crate) fn record_f32le_bytes(&self, bytes: &[u8]) {
+        let mut sum_squares = 0.0f64;
+        let mut peak = 0.0f32;
+        let mut nonzero = 0u64;
+        let samples = bytes.len() / 4;
+
+        for index in 0..samples {
+            let byte_index = index * 4;
+            let sample = f32::from_le_bytes([
+                bytes[byte_index],
+                bytes[byte_index + 1],
+                bytes[byte_index + 2],
+                bytes[byte_index + 3],
+            ]);
+            let magnitude = sample.abs();
+            sum_squares += f64::from(sample) * f64::from(sample);
+            if magnitude > peak {
+                peak = magnitude;
+            }
+            if sample != 0.0 {
+                nonzero += 1;
+            }
+        }
+
+        self.record_aggregate(samples as u64, sum_squares, peak, nonzero);
+    }
+
+    #[inline]
+    fn record_aggregate(&self, samples: u64, sum_squares: f64, peak: f32, nonzero: u64) {
+        if samples == 0 {
+            return;
+        }
+
+        self.samples.fetch_add(samples, Ordering::Relaxed);
+        self.nonzero.fetch_add(nonzero, Ordering::Relaxed);
+
+        // There is one writer per accumulator, so load/store avoids an
+        // unbounded compare-exchange loop on the real-time thread.
+        let accumulated = f64::from_bits(self.sum_squares_bits.load(Ordering::Relaxed));
+        self.sum_squares_bits
+            .store((accumulated + sum_squares).to_bits(), Ordering::Relaxed);
+
+        let previous_peak = f32::from_bits(self.peak_bits.load(Ordering::Relaxed));
+        if peak > previous_peak {
+            self.peak_bits.store(peak.to_bits(), Ordering::Relaxed);
+        }
+    }
+
+    pub(crate) fn snapshot(&self) -> SignalMetricsSnapshot {
+        let samples = self.samples.load(Ordering::Relaxed);
+        let sum_squares = f64::from_bits(self.sum_squares_bits.load(Ordering::Relaxed));
+        SignalMetricsSnapshot {
+            samples,
+            rms: if samples == 0 {
+                0.0
+            } else {
+                (sum_squares / samples as f64).sqrt()
+            },
+            peak: f32::from_bits(self.peak_bits.load(Ordering::Relaxed)),
+            nonzero: self.nonzero.load(Ordering::Relaxed),
+        }
+    }
+}
 
 /// Convert F32LE bytes to f32 samples in batches.
 ///

@@ -26,7 +26,8 @@
 //! The `AudioRingProducer` is `Send`, allowing it to be moved to the PipeWire callback thread.
 
 use super::common::{
-    build_audio_format_pod, bytes_to_f32_samples, setup_stop_timer, RT_BATCH_SIZE,
+    build_audio_format_pod, bytes_to_f32_samples, setup_stop_timer, SignalMetrics,
+    SignalMetricsSnapshot, RT_BATCH_SIZE,
 };
 use super::context::PipeWireContext;
 use crate::error::{PipeWireError, Result};
@@ -102,11 +103,42 @@ pub struct CaptureStream {
     /// Samples captured counter (atomic for cross-thread access).
     samples_captured: Arc<AtomicU64>,
     callbacks: Arc<AtomicU64>,
+    signal_metrics: Arc<CaptureSignalMetrics>,
     /// Handle to the PipeWire thread (for cleanup).
     thread_handle: Option<std::thread::JoinHandle<()>>,
     /// Producer for manual sample injection (testing/stub mode).
     /// None when running with real PipeWire stream.
     stub_producer: Option<AudioRingProducer>,
+}
+
+/// Signal measurements at the capture callback and ring-buffer boundary.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CaptureSignalMetricsSnapshot {
+    /// A: decoded samples received from the PipeWire capture buffer.
+    pub callback_input: SignalMetricsSnapshot,
+    /// B: samples accepted for insertion into the capture ring buffer.
+    pub ring_input: SignalMetricsSnapshot,
+}
+
+#[derive(Debug, Default)]
+struct CaptureSignalMetrics {
+    enabled: AtomicBool,
+    callback_input: SignalMetrics,
+    ring_input: SignalMetrics,
+}
+
+impl CaptureSignalMetrics {
+    #[inline]
+    fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::Relaxed)
+    }
+
+    fn snapshot(&self) -> CaptureSignalMetricsSnapshot {
+        CaptureSignalMetricsSnapshot {
+            callback_input: self.callback_input.snapshot(),
+            ring_input: self.ring_input.snapshot(),
+        }
+    }
 }
 
 impl CaptureStream {
@@ -172,6 +204,7 @@ impl CaptureStream {
             device_disconnected: Arc::new(AtomicBool::new(false)),
             samples_captured: Arc::new(AtomicU64::new(0)),
             callbacks: Arc::new(AtomicU64::new(0)),
+            signal_metrics: Arc::new(CaptureSignalMetrics::default()),
             thread_handle: None,
             stub_producer: Some(producer),
         };
@@ -215,6 +248,7 @@ impl CaptureStream {
             device_disconnected: Arc::new(AtomicBool::new(false)),
             samples_captured: Arc::new(AtomicU64::new(0)),
             callbacks: Arc::new(AtomicU64::new(0)),
+            signal_metrics: Arc::new(CaptureSignalMetrics::default()),
             thread_handle: None,
             stub_producer: Some(producer),
         };
@@ -261,6 +295,21 @@ impl CaptureStream {
         self.callbacks.load(Ordering::Relaxed)
     }
 
+    /// Enable or disable aggregate signal diagnostics in the audio callback.
+    ///
+    /// Disabled by default so normal operation does not scan every sample a
+    /// second time. Enable this before `start()` for verbose diagnostics.
+    pub fn set_signal_metrics_enabled(&self, enabled: bool) {
+        self.signal_metrics
+            .enabled
+            .store(enabled, Ordering::Relaxed);
+    }
+
+    /// Return aggregate signal diagnostics for points A and B.
+    pub fn signal_metrics(&self) -> CaptureSignalMetricsSnapshot {
+        self.signal_metrics.snapshot()
+    }
+
     /// Start capturing audio with real PipeWire stream.
     ///
     /// This creates a dedicated thread running a PipeWire `ThreadLoop` with
@@ -298,10 +347,13 @@ impl CaptureStream {
         };
 
         // Clone shared state for the thread
-        let is_running = Arc::clone(&self.is_running);
-        let device_disconnected = Arc::clone(&self.device_disconnected);
-        let samples_captured = Arc::clone(&self.samples_captured);
-        let callbacks = Arc::clone(&self.callbacks);
+        let shared = CaptureSharedState {
+            is_running: Arc::clone(&self.is_running),
+            device_disconnected: Arc::clone(&self.device_disconnected),
+            samples_captured: Arc::clone(&self.samples_captured),
+            callbacks: Arc::clone(&self.callbacks),
+            signal_metrics: Arc::clone(&self.signal_metrics),
+        };
         let device_id = self.device_id.clone();
         let format = self.format;
 
@@ -309,15 +361,7 @@ impl CaptureStream {
         let handle = std::thread::Builder::new()
             .name(format!("pw-capture-{}", device_id))
             .spawn(move || {
-                if let Err(e) = run_capture_loop(
-                    producer,
-                    &device_id,
-                    format,
-                    is_running,
-                    device_disconnected,
-                    samples_captured,
-                    callbacks,
-                ) {
+                if let Err(e) = run_capture_loop(producer, &device_id, format, shared) {
                     error!(device = %device_id, error = %e, "capture loop failed");
                 }
             })
@@ -433,6 +477,15 @@ struct CaptureUserData {
     /// Atomic counter for samples captured (shared with CaptureStream).
     samples_captured: Arc<AtomicU64>,
     callbacks: Arc<AtomicU64>,
+    signal_metrics: Arc<CaptureSignalMetrics>,
+}
+
+struct CaptureSharedState {
+    is_running: Arc<AtomicBool>,
+    device_disconnected: Arc<AtomicBool>,
+    samples_captured: Arc<AtomicU64>,
+    callbacks: Arc<AtomicU64>,
+    signal_metrics: Arc<CaptureSignalMetrics>,
 }
 
 /// Run the PipeWire capture loop in a dedicated thread.
@@ -460,10 +513,7 @@ fn run_capture_loop(
     producer: AudioRingProducer,
     device_id: &str,
     format: AudioFormat,
-    is_running: Arc<AtomicBool>,
-    device_disconnected: Arc<AtomicBool>,
-    samples_captured: Arc<AtomicU64>,
-    callbacks: Arc<AtomicU64>,
+    shared: CaptureSharedState,
 ) -> Result<()> {
     // Initialize PipeWire for this thread
     pw::init();
@@ -494,12 +544,21 @@ fn run_capture_loop(
     info!(device = %device_id, "connected to PipeWire daemon");
 
     // Build stream properties
-    let stream_props = properties! {
+    let mut stream_props = properties! {
         *pw::keys::MEDIA_TYPE => "Audio",
         *pw::keys::MEDIA_CATEGORY => "Capture",
         *pw::keys::MEDIA_ROLE => "Communication",
         *pw::keys::NODE_NAME => format!("openspeechbridge-capture-{}", device_id),
+        *pw::keys::NODE_DONT_RECONNECT => "true",
+        "state.restore-target" => "false",
     };
+    if device_id != "default" && !device_id.is_empty() {
+        // PipeWire target IDs in pw_stream_connect are deprecated. The target
+        // property accepts object.serial (the value shown by pw-cli/pw-record)
+        // or node.name and prevents policy from relinking capture to a newly
+        // created virtual source.
+        stream_props.insert("target.object", device_id);
+    }
 
     // Create the capture stream
     let stream = pw::stream::Stream::new(&core, "osb-capture", stream_props).map_err(|e| {
@@ -509,12 +568,13 @@ fn run_capture_loop(
     // Prepare user data for callbacks
     let user_data = CaptureUserData {
         producer,
-        samples_captured: Arc::clone(&samples_captured),
-        callbacks,
+        samples_captured: Arc::clone(&shared.samples_captured),
+        callbacks: Arc::clone(&shared.callbacks),
+        signal_metrics: Arc::clone(&shared.signal_metrics),
     };
 
     // Clone references for callbacks
-    let device_disconnected_cb = Arc::clone(&device_disconnected);
+    let device_disconnected_cb = Arc::clone(&shared.device_disconnected);
     let mainloop_weak = mainloop.downgrade();
 
     // Register stream listener with callbacks
@@ -542,7 +602,7 @@ fn run_capture_loop(
                 _ => {}
             }
         })
-        .process(|stream, user_data| {
+        .process(move |stream, user_data| {
             // REAL-TIME SAFE CALLBACK
             // This runs in PipeWire's real-time audio thread.
             // Only lock-free operations allowed here.
@@ -560,7 +620,9 @@ fn run_capture_loop(
                         // Bounds check
                         if offset + size <= slice.len() {
                             let audio_bytes = &slice[offset..offset + size];
-                            let _num_samples = audio_bytes.len() / 4;
+                            let frame_bytes = channels as usize * 4;
+                            let audio_len = (audio_bytes.len() / frame_bytes) * frame_bytes;
+                            let audio_bytes = &audio_bytes[..audio_len];
 
                             // Process in batches using stack buffer (no allocation)
                             let mut pushed_total = 0usize;
@@ -577,8 +639,22 @@ fn run_capture_loop(
                                     &mut sample_buf[..batch_samples],
                                 );
 
+                                let collect_signal_metrics = user_data.signal_metrics.is_enabled();
+                                if collect_signal_metrics {
+                                    user_data
+                                        .signal_metrics
+                                        .callback_input
+                                        .record(&sample_buf[..converted]);
+                                }
+
                                 // Push batch to ring buffer (lock-free, real-time safe)
                                 let pushed = user_data.producer.push(&sample_buf[..converted]);
+                                if collect_signal_metrics {
+                                    user_data
+                                        .signal_metrics
+                                        .ring_input
+                                        .record(&sample_buf[..pushed]);
+                                }
                                 pushed_total += pushed;
 
                                 if pushed < converted {
@@ -612,18 +688,11 @@ fn run_capture_loop(
     let mut params = [Pod::from_bytes(&values)
         .ok_or_else(|| PipeWireError::Internal("failed to create format pod".to_string()))?];
 
-    // Parse device_id to determine target node
-    let target_id: Option<u32> = if device_id == "default" || device_id.is_empty() {
-        None // Let PipeWire choose the default device
-    } else {
-        device_id.parse().ok() // Try to parse as node ID
-    };
-
     // Connect the stream (Direction::Input for capture)
     stream
         .connect(
             spa::utils::Direction::Input,
-            target_id,
+            None,
             pw::stream::StreamFlags::AUTOCONNECT
                 | pw::stream::StreamFlags::MAP_BUFFERS
                 | pw::stream::StreamFlags::RT_PROCESS,
@@ -636,7 +705,7 @@ fn run_capture_loop(
     info!(device = %device_id, "capture stream connected, entering main loop");
 
     // Set up a timer to check is_running flag periodically
-    let _timer = setup_stop_timer(&mainloop, is_running, 100)?;
+    let _timer = setup_stop_timer(&mainloop, Arc::clone(&shared.is_running), 100)?;
 
     // Run the main loop (blocks until quit)
     mainloop.run();
@@ -644,7 +713,7 @@ fn run_capture_loop(
     // Cleanup
     let _ = stream.disconnect();
 
-    let total = samples_captured.load(Ordering::Relaxed);
+    let total = shared.samples_captured.load(Ordering::Relaxed);
     info!(
         device = %device_id,
         total_samples = total,

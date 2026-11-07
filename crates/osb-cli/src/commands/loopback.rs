@@ -14,7 +14,8 @@ use tracing::info;
 
 #[cfg(target_os = "linux")]
 use osb_pipewire::linux::{
-    CaptureStream, PipeWireContext, VirtualMicMetricsSnapshot, VirtualMicrophone,
+    CaptureSignalMetricsSnapshot, CaptureStream, PipeWireContext, VirtualMicMetricsSnapshot,
+    VirtualMicrophone,
 };
 
 /// Loopback metrics for display.
@@ -41,6 +42,8 @@ struct LoopbackMetrics {
     virtual_frames_requested: u64,
     /// Frames consumed by the virtual microphone.
     virtual_frames_consumed: u64,
+    capture_signal: CaptureSignalMetricsSnapshot,
+    virtual_signal: VirtualMicMetricsSnapshot,
     /// Duration running.
     elapsed: Duration,
 }
@@ -52,10 +55,11 @@ impl LoopbackMetrics {
 }
 
 /// Print metrics to stdout (overwrites previous line).
-fn print_metrics(metrics: &LoopbackMetrics, first_print: bool) {
+fn print_metrics(metrics: &LoopbackMetrics, first_print: bool, verbose: bool) {
     // Move cursor up if not first print
     if !first_print {
-        print!("\x1b[8A"); // Move up 8 lines
+        let lines_to_move = if verbose { 14 } else { 8 };
+        print!("\x1b[{lines_to_move}A");
     }
 
     let buffer_bar = create_progress_bar(metrics.buffer_fill, 20);
@@ -93,9 +97,34 @@ fn print_metrics(metrics: &LoopbackMetrics, first_print: bool) {
         "│ VM consumed: {:>10}                         │",
         metrics.virtual_frames_consumed
     );
+    if verbose {
+        print_signal_row("A capture", metrics.capture_signal.callback_input);
+        print_signal_row("B ring in", metrics.capture_signal.ring_input);
+        print_signal_row("C ring out", metrics.virtual_signal.ring_output);
+        print_signal_row("D pre-copy", metrics.virtual_signal.output_before_copy);
+        print_signal_row("D postcopy", metrics.virtual_signal.output_after_copy);
+        let buffer = metrics.virtual_signal.buffer;
+        println!(
+            "│ SPA off/size/max {:>3}/{:>5}/{:>6} req {:>4} out {:>5}/{:<2} │",
+            buffer.initial_offset,
+            buffer.initial_size,
+            buffer.maxsize,
+            buffer.requested_frames,
+            buffer.published_size,
+            buffer.published_stride
+        );
+    }
     println!("└─────────────────────────────────────────────┘");
 
     io::stdout().flush().ok();
+}
+
+#[cfg(target_os = "linux")]
+fn print_signal_row(label: &str, signal: osb_pipewire::linux::SignalMetricsSnapshot) {
+    println!(
+        "│ {:<10} rms {:>8.6} pk {:>8.6} nz {:>8} │",
+        label, signal.rms, signal.peak, signal.nonzero
+    );
 }
 
 /// Create a progress bar string.
@@ -119,7 +148,12 @@ fn format_number(n: u64) -> String {
 }
 
 /// Run the loopback test.
-pub async fn run(input_device: Option<String>, duration: u64, json_output: bool) -> Result<()> {
+pub async fn run(
+    input_device: Option<String>,
+    duration: u64,
+    json_output: bool,
+    verbose: bool,
+) -> Result<()> {
     let device = input_device.unwrap_or_else(|| "default".to_string());
 
     if !json_output {
@@ -141,7 +175,7 @@ pub async fn run(input_device: Option<String>, duration: u64, json_output: bool)
 
     #[cfg(target_os = "linux")]
     {
-        run_linux_loopback(&device, duration, json_output).await
+        run_linux_loopback(&device, duration, json_output, verbose).await
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -171,7 +205,12 @@ fn truncate_str(s: &str, max_len: usize) -> String {
 }
 
 #[cfg(target_os = "linux")]
-async fn run_linux_loopback(device: &str, duration: u64, json_output: bool) -> Result<()> {
+async fn run_linux_loopback(
+    device: &str,
+    duration: u64,
+    json_output: bool,
+    verbose: bool,
+) -> Result<()> {
     info!(device = %device, "initializing loopback");
 
     // Initialize PipeWire context
@@ -204,6 +243,9 @@ async fn run_linux_loopback(device: &str, duration: u64, json_output: bool) -> R
     let (mut vmic, mut vmic_producer) =
         VirtualMicrophone::new(&ctx, "OpenSpeechBridge Virtual Microphone", BUFFER_FRAMES)
             .context("Failed to create virtual microphone")?;
+
+    capture.set_signal_metrics_enabled(verbose);
+    vmic.set_signal_metrics_enabled(verbose);
 
     // Start the streams
     // Note: After start(), the internal producer/consumer are moved to
@@ -266,10 +308,12 @@ async fn run_linux_loopback(device: &str, duration: u64, json_output: bool) -> R
         metrics.virtual_frames_consumed = snapshot.frames_consumed;
         metrics.capture_callbacks = capture.callbacks();
         metrics.capture_samples = capture.samples_captured();
+        metrics.capture_signal = capture.signal_metrics();
+        metrics.virtual_signal = snapshot;
 
         // Print metrics (every 500ms)
         if !json_output && metrics.elapsed.as_millis() % 500 < 50 {
-            print_metrics(&metrics, first_print);
+            print_metrics(&metrics, first_print, verbose);
             first_print = false;
         }
 
