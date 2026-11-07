@@ -1,0 +1,18 @@
+{
+  "status": "pass",
+  "input": "tools/benchmark/corpus/short_05.wav",
+  "whisper_engine": "faster-whisper",
+  "whisper_model": "small",
+  "compute_type": "int8",
+  "threads": 4,
+  "detected_language": "pt",
+  "translated_text": "The police said that the body seemed to be there for about a day.",
+  "whisper_load_seconds": 2.372874492999472,
+  "translation_seconds": 3.4709876839988283,
+  "kokoro_load_seconds": 5.095118526000078,
+  "synthesis_seconds": 3.669842860999779,
+  "output_audio_seconds": 3.85,
+  "output_sample_rate": 24000,
+  "text_output": "tools/benchmark/generated/offline-spike/translated.txt",
+  "wav_output": "tools/benchmark/generated/offline-spike/output.wav"
+}

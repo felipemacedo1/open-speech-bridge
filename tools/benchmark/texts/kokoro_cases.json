@@ -1,0 +1,24 @@
+{
+  "cases": [
+    {
+      "id": "short",
+      "category": "short",
+      "text": "Good morning everyone. How are you?"
+    },
+    {
+      "id": "medium",
+      "category": "medium",
+      "text": "The Open Speech Bridge processes speech locally and sends translated audio to a virtual microphone. Today we are measuring CPU latency, memory use, and pronunciation quality."
+    },
+    {
+      "id": "technical",
+      "category": "technical",
+      "text": "Version 2.1 uses 16 kilohertz PCM audio, AVX2 instructions, and a 250 millisecond bounded buffer."
+    },
+    {
+      "id": "long",
+      "category": "long",
+      "text": "Good morning everyone. This benchmark evaluates an offline speech translation workflow for ordinary desktop computers. The source audio is spoken in Brazilian Portuguese, translated directly into English text, and synthesized with a generic English voice. We record model startup time, warm inference latency, memory consumption, processor utilization, and real-time factor. The benchmark does not use a graphics processor, a cloud service, or a paid application programming interface. It also does not connect to a physical microphone or virtual audio device. Those integrations belong to a later milestone. Our current goal is simply to determine which inference engine offers the best practical balance of speed, quality, portability, licensing, and operational complexity. The final production design will keep the selected models warm in isolated local worker processes, while the Rust runtime remains responsible for bounded audio buffers, timestamps, supervision, privacy, and operating-system audio routing."
+    }
+  ]
+}
