@@ -1,8 +1,8 @@
 //! Offline and end-to-end WAV translation command (`openspeechbridge translate`).
 //!
 //! Feeds a RIFF/WAVE file through the daemon's `Pipeline` (resampling + bounded
-//! VAD endpointing -> supervised UDS workers -> output resampling) and writes
-//! the synthesized target-language speech to an output WAV file.
+//! VAD endpointing -> supervised UDS workers -> clause-chunked TTS -> output
+//! resampling) and writes the synthesized target-language speech to an output WAV file.
 
 use crate::wav::{read_wav_f32, write_wav_pcm16};
 use anyhow::{bail, Context, Result};
@@ -17,6 +17,7 @@ use osb_engine_mock::MockEngine;
 use osb_protocol::engine::{EngineInfo, EngineType};
 use osb_protocol::message::{EngineRequest, EngineResponse};
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -55,6 +56,10 @@ pub struct TranslateArgs {
     /// Bypass VAD segmentation and translate the entire input file as one utterance
     #[arg(long)]
     pub no_vad: bool,
+
+    /// Disable M5 clause-chunked incremental TTS synthesis
+    #[arg(long)]
+    pub no_chunked_tts: bool,
 
     /// Use deterministic MockEngine instead of Python ML workers
     #[arg(long)]
@@ -100,10 +105,12 @@ struct TranslateSummary {
     output_duration_ms: u64,
     utterances_detected: usize,
     utterances_translated: usize,
+    clauses_synthesized: usize,
     startup_ms: u64,
     speech_stage_ms: u64,
     mt_stage_ms: u64,
     tts_stage_ms: u64,
+    first_audio_ms: u64,
     total_turnaround_ms: u64,
     realtime_factor: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -140,15 +147,28 @@ pub async fn run(args: TranslateArgs, json_output: bool) -> Result<()> {
         },
     };
 
-    let mut pipeline = Pipeline::new(PipelineConfig {
-        input_format: input_wav.format,
-        output_format,
-        engine_format: AudioFormat::SPEECH_RECOGNITION,
-        source_language: args.source.clone(),
-        target_language: args.target.clone(),
-        voice_id: Some(args.voice.clone()),
-        ..PipelineConfig::default()
-    });
+    let cfg_engine = &runtime.config().config.engine;
+    let cfg_vad = runtime.config().config.audio.vad;
+    let chunked_tts = if args.no_chunked_tts {
+        false
+    } else {
+        cfg_engine.chunked_tts
+    };
+
+    let mut pipeline = Pipeline::new(
+        PipelineConfig {
+            input_format: input_wav.format,
+            output_format,
+            engine_format: AudioFormat::SPEECH_RECOGNITION,
+            source_language: args.source.clone(),
+            target_language: args.target.clone(),
+            voice_id: Some(args.voice.clone()),
+            chunked_tts,
+            min_clause_words: cfg_engine.min_clause_words,
+            ..PipelineConfig::default()
+        }
+        .with_vad_params(cfg_vad),
+    );
     pipeline.start()?;
 
     let route = {
@@ -170,6 +190,8 @@ pub async fn run(args: TranslateArgs, json_output: bool) -> Result<()> {
     let mut speech_stage_ms = 0u64;
     let mut mt_stage_ms = 0u64;
     let mut tts_stage_ms = 0u64;
+    let mut first_audio_ms = 0u64;
+    let mut clauses_synthesized = 0usize;
     let mut utterances_translated = 0usize;
 
     for seg in &segments {
@@ -178,7 +200,11 @@ pub async fn run(args: TranslateArgs, json_output: bool) -> Result<()> {
             pipeline.process_utterance(&mut sup, &route, seg).await?
         };
         if let Some(utt) = translated {
+            if utterances_translated == 0 {
+                first_audio_ms = utt.first_audio_ms;
+            }
             utterances_translated += 1;
+            clauses_synthesized += utt.clauses_synthesized;
             speech_stage_ms += utt.speech_stage_ms;
             mt_stage_ms += utt.mt_stage_ms;
             tts_stage_ms += utt.tts_stage_ms;
@@ -192,6 +218,9 @@ pub async fn run(args: TranslateArgs, json_output: bool) -> Result<()> {
     }
 
     let total_turnaround_ms = turnaround_started.elapsed().as_millis() as u64;
+    if first_audio_ms == 0 {
+        first_audio_ms = total_turnaround_ms;
+    }
     let _ = pipeline.stop();
     let _ = runtime.stop().await;
 
@@ -217,10 +246,12 @@ pub async fn run(args: TranslateArgs, json_output: bool) -> Result<()> {
         output_duration_ms,
         utterances_detected,
         utterances_translated,
+        clauses_synthesized,
         startup_ms,
         speech_stage_ms,
         mt_stage_ms,
         tts_stage_ms,
+        first_audio_ms,
         total_turnaround_ms,
         realtime_factor: (rtf * 1000.0).round() / 1000.0,
         translated_text: args.print_text.then(|| texts.join(" ")),
@@ -302,6 +333,7 @@ async fn build_translation_runtime(args: &TranslateArgs) -> Result<Runtime> {
     let sdk_workers_dir = locate_python_workers_dir()?;
     let whisper_script = sdk_workers_dir.join("faster_whisper_worker.py");
     let kokoro_script = sdk_workers_dir.join("kokoro_worker.py");
+    let mt_script = sdk_workers_dir.join("text_translation_worker.py");
 
     let mut whisper_args = vec![
         whisper_script.display().to_string(),
@@ -331,19 +363,13 @@ async fn build_translation_runtime(args: &TranslateArgs) -> Result<Runtime> {
         kokoro_args.push(hf_dir.display().to_string());
     }
 
-    let mut cfg = Config::default();
-    cfg.engine.source_language = args.source.clone();
-    cfg.engine.target_language = args.target.clone();
-    cfg.engine.speech_translation_engine = Some("faster-whisper".to_string());
-    cfg.engine.tts_engine = Some("kokoro-tts".to_string());
-    cfg.engine.startup_timeout_ms = 60_000;
-    cfg.engine.processing_timeout_ms = 30_000;
-    cfg.engine.workers = vec![
+    let mut workers = vec![
         WorkerProcessConfig {
             id: "faster-whisper".to_string(),
             name: "Faster-Whisper CPU Worker".to_string(),
             program: args.python.display().to_string(),
             args: whisper_args,
+            env: BTreeMap::new(),
             max_restarts: 2,
         },
         WorkerProcessConfig {
@@ -351,9 +377,38 @@ async fn build_translation_runtime(args: &TranslateArgs) -> Result<Runtime> {
             name: "Kokoro-82M CPU TTS Worker".to_string(),
             program: args.python.display().to_string(),
             args: kokoro_args,
+            env: BTreeMap::new(),
             max_restarts: 2,
         },
     ];
+
+    if !args.target.to_lowercase().starts_with("en") && mt_script.is_file() {
+        workers.push(WorkerProcessConfig {
+            id: "text-translator".to_string(),
+            name: "Local Text Translation Worker".to_string(),
+            program: args.python.display().to_string(),
+            args: vec![
+                mt_script.display().to_string(),
+                "--engine-id".to_string(),
+                "text-translator".to_string(),
+                "--threads".to_string(),
+                args.threads.to_string(),
+            ],
+            env: BTreeMap::new(),
+            max_restarts: 2,
+        });
+    }
+
+    let mut cfg = Config::default();
+    cfg.engine.source_language = args.source.clone();
+    cfg.engine.target_language = args.target.clone();
+    cfg.engine.speech_translation_engine = Some("faster-whisper".to_string());
+    cfg.engine.stt_engine = Some("faster-whisper".to_string());
+    cfg.engine.translation_engine = Some("text-translator".to_string());
+    cfg.engine.tts_engine = Some("kokoro-tts".to_string());
+    cfg.engine.startup_timeout_ms = 60_000;
+    cfg.engine.processing_timeout_ms = 30_000;
+    cfg.engine.workers = workers;
 
     Ok(Runtime::new(RuntimeConfig {
         config: cfg,
@@ -425,8 +480,8 @@ fn emit_summary(summary: &TranslateSummary, json_output: bool) -> Result<()> {
     );
     println!("  Route:               {}", summary.route);
     println!(
-        "  Utterances:          {} translated / {} detected",
-        summary.utterances_translated, summary.utterances_detected
+        "  Utterances:          {} translated / {} detected ({} TTS clauses)",
+        summary.utterances_translated, summary.utterances_detected, summary.clauses_synthesized
     );
     println!("  Worker startup:      {} ms", summary.startup_ms);
     println!("  Speech stage:        {} ms", summary.speech_stage_ms);
@@ -434,6 +489,7 @@ fn emit_summary(summary: &TranslateSummary, json_output: bool) -> Result<()> {
         println!("  MT stage:            {} ms", summary.mt_stage_ms);
     }
     println!("  TTS stage:           {} ms", summary.tts_stage_ms);
+    println!("  First audio (TTFA):  {} ms", summary.first_audio_ms);
     println!(
         "  Total turnaround:    {} ms (RTF {:.3}x)",
         summary.total_turnaround_ms, summary.realtime_factor

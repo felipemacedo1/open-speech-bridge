@@ -39,8 +39,8 @@ pub use engine_supervisor::{
 };
 pub use ipc::{EngineRpcClient, IpcClientConfig};
 pub use pipeline::{
-    Pipeline, PipelineConfig, PipelineMetricsSnapshot, PipelineRoute, PipelineStage,
-    TranslatedUtterance,
+    split_text_into_tts_clauses, Pipeline, PipelineConfig, PipelineMetricsSnapshot, PipelineRoute,
+    PipelineStage, TranslatedUtterance,
 };
 pub use runtime::{Runtime, RuntimeConfig, RuntimeState};
 pub use worker::{ManagedWorker, WorkerSpec, WorkerTransport};

@@ -56,9 +56,11 @@ pub async fn run(json_output: bool) -> Result<()> {
     let mock_bin = find_mock_worker_binary();
     let whisper_script = find_python_worker_script("faster_whisper_worker.py");
     let kokoro_script = find_python_worker_script("kokoro_worker.py");
+    let mt_script = find_python_worker_script("text_translation_worker.py");
 
     supervisor.register(build_whisper_info());
     supervisor.register(build_kokoro_info());
+    supervisor.register(build_mt_info());
     supervisor.register(build_mock_info());
 
     let mut engines = supervisor.list_engines();
@@ -82,6 +84,7 @@ pub async fn run(json_output: bool) -> Result<()> {
                         "mock" => mock_bin.is_some(),
                         "faster-whisper" => whisper_script.is_some(),
                         "kokoro-tts" => kokoro_script.is_some(),
+                        "text-translator" => mt_script.is_some(),
                         _ => false,
                     };
                     EngineOutput {
@@ -140,6 +143,10 @@ pub async fn run(json_output: bool) -> Result<()> {
                     .as_ref()
                     .map(|p| format!("ready ({})", p.display()))
                     .unwrap_or_else(|| "script not found".into()),
+                "text-translator" => mt_script
+                    .as_ref()
+                    .map(|p| format!("ready ({})", p.display()))
+                    .unwrap_or_else(|| "script not found".into()),
                 _ => "external".into(),
             };
             println!("    UDS Worker:      {}", worker_status);
@@ -186,6 +193,25 @@ fn build_kokoro_info() -> EngineInfo {
         .model("hexgrad/Kokoro-82M")
         .license("Apache-2.0")
         .weights_license("Apache-2.0 (verify voice pack provenance before redistribution)")
+        .commercial_use(true)
+        .build()
+}
+
+fn build_mt_info() -> EngineInfo {
+    let mut caps = CapabilitySet::new();
+    caps.add(Capability::TextTranslation)
+        .add(Capability::CpuOnly)
+        .add_language_pair(LanguagePair::en_pt())
+        .add_language_pair(LanguagePair::pt_en());
+
+    EngineInfo::builder("text-translator")
+        .name("Local Text Translation Worker (EN <-> PT-BR)")
+        .version("0.1.0")
+        .engine_type(EngineType::Python)
+        .capabilities(caps)
+        .model("MarianMT / Offline Lexicon")
+        .license("Apache-2.0")
+        .weights_license("Apache-2.0")
         .commercial_use(true)
         .build()
 }

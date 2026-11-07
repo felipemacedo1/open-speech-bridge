@@ -39,6 +39,8 @@ pub struct RuntimeConfig {
     pub enable_virtual_sink: bool,
     /// Virtual microphone name
     pub virtual_mic_name: String,
+    /// Virtual sink name
+    pub virtual_sink_name: String,
 }
 
 impl Default for RuntimeConfig {
@@ -48,6 +50,7 @@ impl Default for RuntimeConfig {
             enable_virtual_mic: true,
             enable_virtual_sink: false,
             virtual_mic_name: "OpenSpeechBridge".to_string(),
+            virtual_sink_name: "OpenSpeechBridge Incoming".to_string(),
         }
     }
 }
@@ -84,9 +87,24 @@ impl Runtime {
         }
         let raw = std::fs::read_to_string(path)?;
         let parsed = Config::from_toml_str(&raw)?;
+        let enable_virtual_mic = parsed.audio.enable_virtual_mic;
+        let enable_virtual_sink = parsed.audio.enable_virtual_sink || parsed.engine.enable_incoming;
+        let virtual_mic_name = if parsed.audio.virtual_mic_name.is_empty() {
+            "OpenSpeechBridge".to_string()
+        } else {
+            parsed.audio.virtual_mic_name.clone()
+        };
+        let virtual_sink_name = if parsed.audio.virtual_sink_name.is_empty() {
+            "OpenSpeechBridge Incoming".to_string()
+        } else {
+            parsed.audio.virtual_sink_name.clone()
+        };
         Ok(Self::new(RuntimeConfig {
             config: parsed,
-            ..RuntimeConfig::default()
+            enable_virtual_mic,
+            enable_virtual_sink,
+            virtual_mic_name,
+            virtual_sink_name,
         }))
     }
 
@@ -209,15 +227,33 @@ fn register_configured_workers(supervisor: &mut EngineSupervisor, config: &Confi
             .version("0.1.0")
             .engine_type(EngineType::External)
             .build();
-        let spec = WorkerSpec::spawn(&worker_cfg.program, &worker_cfg.args)
+        let program = resolve_worker_program(&worker_cfg.program);
+        let mut spec = WorkerSpec::spawn(program, &worker_cfg.args)
             .with_startup_timeout(startup)
             .with_processing_timeout(processing);
+        for (k, v) in &worker_cfg.env {
+            spec = spec.with_env(k, v);
+        }
         let policy = RestartPolicy {
             max_restarts: worker_cfg.max_restarts,
             ..RestartPolicy::default()
         };
         supervisor.register_worker(info, spec, policy);
     }
+}
+
+fn resolve_worker_program(configured: &str) -> String {
+    let path = Path::new(configured);
+    if path.components().count() > 1 && !path.exists() && configured.contains("python") {
+        return "python3".to_string();
+    }
+    if configured == "python3" {
+        let local_venv = Path::new("tools/benchmark/.venv/bin/python");
+        if local_venv.is_file() {
+            return local_venv.display().to_string();
+        }
+    }
+    configured.to_string()
 }
 
 #[cfg(test)]

@@ -2,6 +2,27 @@
 
 > Last updated: 2026-11-07
 
+## Live Profiles, M5 Clause-Chunked Streaming TTS & M4 Full Duplex (PT-BR ↔ EN) — 2026-11-07
+
+- Organized and pushed 4 atomic commits (`1ec3ccf`, `de5f5c8`, `75166a1`, `2ab4548`) for M1 PipeWire fixes, M2 CPU research/benchmark, M2 Engine Runtime (`OSBP` v1), and M3 Local Translation to `origin`, then implemented ready-to-use live TOML profiles, **Milestone 5 (Clause-Chunked Streaming TTS)**, and **Milestone 4 (Full Duplex Bidirectional Pipeline)**:
+- **Ready-to-Use Live TOML Profiles (`config/`)**:
+  - [`config/live-ptbr-to-en.toml`](../config/live-ptbr-to-en.toml): Outgoing live voice-call profile (`PT-BR -> EN`, conversational VAD parameters, `faster-whisper-small` `int8` + `Kokoro-82M` `af_heart`, virtual mic `"OpenSpeechBridge"`).
+  - [`config/full-duplex-ptbr-en.toml`](../config/full-duplex-ptbr-en.toml): Bidirectional live voice-call profile adding `text-translator` (`en-US <-> pt-BR`) and virtual sink `"OpenSpeechBridge Incoming"`.
+  - Extended `Config` (`crates/osb-core/src/config.rs`) and `Runtime::from_config_file` (`crates/osb-daemon/src/runtime.rs`) with `VadConfigParams`, `virtual_mic_name`, `virtual_sink_name`, `enable_virtual_mic`, `enable_virtual_sink`, `voice_id`, `incoming_voice_id`, `chunked_tts`, `min_clause_words`, `enable_incoming`, worker `env` maps, and automatic Python interpreter fallback (`tools/benchmark/.venv/bin/python` <-> `python3`).
+- **M5 Clause-Chunked Streaming TTS (`osb-daemon::pipeline`)**:
+  - Implemented `split_text_into_tts_clauses` (`crates/osb-daemon/src/pipeline.rs`) splitting translated text on sentence/clause boundaries (`.`, `!`, `?`, `,`, `;`, `:`, `—` with `min_clause_words`) and `stream_tts_clauses_to_ring`, which pushes Clause 1's `48 kHz` stereo audio into the SPSC `AudioRingProducer` immediately before synthesizing Clause 2 and releases the `EngineSupervisor` lock between stages/clauses.
+  - Added `first_audio_ms` (`TTFA`), `clauses_synthesized`, and `last_first_audio_ms` metrics to `TranslatedUtterance`, `PipelineMetricsSnapshot`, and `openspeechbridge translate --format json`.
+- **M4 Full Duplex Incoming Path (`osb-pipewire`, `osb-daemon`, `osb-cli`, `engines/sdk-python`)**:
+  - Upgraded `PlaybackStream::start()` (`crates/osb-pipewire/src/linux/playback.rs`) with a real PipeWire RT output thread (`Direction::Output`, `MEDIA_CATEGORY => "Playback"`, `MEDIA_ROLE => "Communication"`) draining `AudioRingConsumer` lock-free via `pop_or_silence`.
+  - Added `text_translation_worker.py` (`engines/sdk-python/osb_engine_sdk/workers/text_translation_worker.py`) supporting `en-US <-> pt-BR` via local MarianMT or offline builtin conversational lexicon fallback, plus `Kokoro-82M` PT-BR synthesis (`lang_code="p"`).
+  - Updated `openspeechbridge run` (`crates/osb-cli/src/commands/run.rs`) to orchestrate concurrent `OutgoingBridge` (`CaptureStream -> Pipeline -> VirtualMicrophone`) and `IncomingBridge` (`VirtualSink -> Pipeline -> PlaybackStream`) with `--duration <SECS>` and `SIGINT`/`SIGTERM` graceful cleanup.
+- **Validation**:
+  - Rust gates: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace` passed: **156 active Rust tests passed** (152 unit/integration + 4 doctests, including `test_m4_full_duplex_bidirectional_and_m5_chunked_tts`) and 15 PipeWire daemon tests remained ignored.
+  - Python SDK gate: `python3 -m unittest discover -s engines/sdk-python/tests -v` passed (**5/5 tests**).
+  - **M5 Chunked TTS (`PT-BR -> EN` on `short_01.wav`, `5.04 s` speech)**: `clauses_synthesized = 2`, `speech_stage_ms = 1,562 ms`, **`first_audio_ms = 2,944 ms` (`1,382 ms` TTS TTFA after speech stage, `< 1.5 s` target!)** vs. `total_turnaround_ms = 3,620 ms` (`0.718x` RTF).
+  - **M4 Reverse Cascade (`EN -> PT-BR` on `/tmp/osb-m5-en.wav`)**: `CascadedSttMtTts(faster-whisper -> text-translator -> kokoro-tts)` produced `"Ele armou uma campainha sem fio. disse ele,"` (`4,025 ms` `48 kHz` stereo PT-BR audio, `clauses_synthesized = 2`, `first_audio_ms = 5,321 ms` vs. `total_turnaround_ms = 6,069 ms`).
+  - **Live `run` Smoke Tests (`config/live-ptbr-to-en.toml` & `config/full-duplex-ptbr-en.toml`, `--foreground --duration 3`)**: verified clean worker startup (`2` and `3` supervised engines ready), active PipeWire Outgoing (`"OpenSpeechBridge"`) and Incoming (`"OpenSpeechBridge Incoming"`) bridges, and graceful shutdown with **0 orphan Python worker processes** and **0 leftover UDS sockets**.
+
 ## M3 First Local Translation (VAD, Pipeline, Python `OSBP` v1 Workers & CLI) — 2026-11-07
 
 - Implemented the Milestone 3 local speech-to-speech translation pipeline across `osb-core`, `osb-audio`, `osb-daemon`, `osb-cli`, and `engines/sdk-python`:

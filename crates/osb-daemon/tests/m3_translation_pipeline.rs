@@ -284,3 +284,112 @@ async fn test_m3_pipeline_cascaded_stt_mt_tts_fallback_route() {
         .expect("cascaded output");
     assert!(!utt.output_samples.is_empty());
 }
+
+#[tokio::test]
+async fn test_m4_full_duplex_bidirectional_and_m5_chunked_tts() {
+    use osb_audio::AudioRingBuffer;
+    use osb_protocol::message::{ProcessingResult, SpeechTranslationOutput};
+    use tokio::sync::{broadcast, Mutex};
+
+    struct ChunkedMockHandler(MockEngine);
+    impl EngineHandler for ChunkedMockHandler {
+        fn handle(&self, request: EngineRequest) -> EngineResponse {
+            match request {
+                EngineRequest::ProcessSpeechTranslation {
+                    request_id,
+                    target_lang,
+                    ..
+                } => EngineResponse::SpeechTranslationResult {
+                    request_id,
+                    result: ProcessingResult::Success {
+                        data: SpeechTranslationOutput {
+                            text:
+                                "Hello team from OpenSpeechBridge, we are testing full duplex now."
+                                    .to_string(),
+                            detected_source: Some("pt-BR".to_string()),
+                            target_lang,
+                            confidence: Some(0.95),
+                        },
+                        processing_ms: 5,
+                    },
+                },
+                EngineRequest::ProcessTts { .. } => {
+                    std::thread::sleep(Duration::from_millis(8));
+                    self.0.handle_request(request)
+                }
+                other => self.0.handle_request(other),
+            }
+        }
+    }
+
+    let mut sup = EngineSupervisor::new();
+    let mock = MockEngine::new();
+    sup.register_in_process(mock.info().clone(), Arc::new(ChunkedMockHandler(mock)));
+    sup.start_all().await.unwrap();
+
+    let shared_sup = Arc::new(Mutex::new(sup));
+    let (shutdown_tx, shutdown_rx_out) = broadcast::channel(1);
+    let shutdown_rx_in = shutdown_tx.subscribe();
+
+    let (mut mic_tx, mic_rx) = AudioRingBuffer::new(48_000 * 2, 2);
+    let (vmic_tx, mut vmic_rx) = AudioRingBuffer::new(48_000 * 4, 2);
+
+    let (mut vsink_tx, vsink_rx) = AudioRingBuffer::new(48_000 * 2, 2);
+    let (play_tx, mut play_rx) = AudioRingBuffer::new(48_000 * 4, 2);
+
+    let sup_out = Arc::clone(&shared_sup);
+    let out_task = tokio::spawn(async move {
+        let mut p = Pipeline::new(PipelineConfig {
+            source_language: "pt-BR".to_string(),
+            target_language: "en-US".to_string(),
+            chunked_tts: true,
+            min_clause_words: 3,
+            ..PipelineConfig::default()
+        });
+        p.run_ring_bridge(sup_out, mic_rx, vmic_tx, shutdown_rx_out)
+            .await
+            .unwrap();
+        p.metrics()
+    });
+
+    let sup_in = Arc::clone(&shared_sup);
+    let in_task = tokio::spawn(async move {
+        let mut p = Pipeline::new(PipelineConfig {
+            enable_outgoing: false,
+            enable_incoming: true,
+            source_language: "en-US".to_string(),
+            target_language: "pt-BR".to_string(),
+            chunked_tts: true,
+            min_clause_words: 3,
+            ..PipelineConfig::default()
+        });
+        p.run_ring_bridge(sup_in, vsink_rx, play_tx, shutdown_rx_in)
+            .await
+            .unwrap();
+        p.metrics()
+    });
+
+    let speech = synthesize_48k_stereo_speech_utterance();
+    for chunk in speech.chunks(1_920) {
+        mic_tx.push(chunk);
+        vsink_tx.push(chunk);
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+
+    tokio::time::sleep(Duration::from_millis(220)).await;
+    let _ = shutdown_tx.send(());
+
+    let out_metrics = out_task.await.unwrap();
+    let in_metrics = in_task.await.unwrap();
+
+    assert_eq!(out_metrics.utterances_processed, 1);
+    assert_eq!(in_metrics.utterances_processed, 1);
+    assert!(out_metrics.output_frames_emitted > 0);
+    assert!(in_metrics.output_frames_emitted > 0);
+    // M5 chunked TTS: first clause audio is emitted before the second clause finishes TTS.
+    assert!(out_metrics.last_first_audio_ms < out_metrics.last_total_ms);
+
+    let mut buf = vec![0.0f32; 4_096];
+    assert!(vmic_rx.pop(&mut buf) > 0);
+    assert!(play_rx.pop(&mut buf) > 0);
+}

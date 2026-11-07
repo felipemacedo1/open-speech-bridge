@@ -225,6 +225,24 @@ class TestOsbpPythonSdk(unittest.TestCase):
             thread.join(timeout=2.0)
             self.assertFalse(thread.is_alive())
 
+    def test_text_translation_worker_offline_lexicon(self) -> None:
+        from osb_engine_sdk.workers.text_translation_worker import TextTranslationWorker
+
+        worker = TextTranslationWorker(backend="builtin")
+        resp = worker.process_translation(
+            {
+                "request_id": 99,
+                "text": "Good morning team, can you hear me clearly?",
+                "source_lang": "en-US",
+                "target_lang": "pt-BR",
+            }
+        )
+        self.assertEqual(resp["type"], "translation_result")
+        self.assertEqual(resp["result"]["status"], "success")
+        translated = resp["result"]["data"]["text"].lower()
+        self.assertIn("bom dia", translated)
+        self.assertIn("você consegue me ouvir", translated)
+
 
 if __name__ == "__main__":
     unittest.main()

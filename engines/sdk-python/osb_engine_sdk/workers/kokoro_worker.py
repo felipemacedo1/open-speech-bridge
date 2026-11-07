@@ -78,8 +78,12 @@ class KokoroTtsWorker(BaseEngineWorker):
 
     def on_initialize(self, config: Any) -> None:
         del config
-        if self.hf_home:
+        if self.hf_home and os.path.isdir(self.hf_home):
             os.environ["HF_HOME"] = self.hf_home
+        else:
+            local_hf = _SDK_ROOT.parents[1] / "tools" / "benchmark" / ".cache" / "huggingface"
+            if local_hf.is_dir():
+                os.environ.setdefault("HF_HOME", str(local_hf))
         if self.offline:
             os.environ.setdefault("HF_HUB_OFFLINE", "1")
 

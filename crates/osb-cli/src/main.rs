@@ -62,6 +62,9 @@ enum Commands {
         /// Run in foreground (don't daemonize)
         #[arg(long)]
         foreground: bool,
+        /// Optional duration in seconds before automatic graceful shutdown (0 = until Ctrl+C / SIGTERM)
+        #[arg(short, long, default_value_t = 0)]
+        duration: u64,
     },
 
     /// Show version and build information
@@ -101,7 +104,11 @@ async fn main() -> anyhow::Result<()> {
             commands::loopback::run(input, duration, json_output, cli.verbose).await
         }
         Commands::Translate(args) => commands::translate::run(*args, json_output).await,
-        Commands::Run { config, foreground } => commands::run::run(config, foreground).await,
+        Commands::Run {
+            config,
+            foreground,
+            duration,
+        } => commands::run::run(config, foreground, duration).await,
         Commands::Version => commands::version::run(json_output),
         Commands::Engines => commands::engines::run(json_output).await,
         Commands::Status => commands::status::run(json_output).await,

@@ -1,7 +1,8 @@
 //! Capability-composed audio translation pipeline.
 //!
 //! Bridges non-blocking SPSC audio ring buffers (or offline PCM streams) to
-//! supervised UDS engines via resampling and bounded VAD endpoint segmentation.
+//! supervised UDS engines via resampling, bounded VAD endpoint segmentation,
+//! and clause-chunked streaming TTS synthesis.
 //! Never executes inside PipeWire real-time callbacks and never logs raw
 //! transcripts or audio samples.
 
@@ -11,7 +12,7 @@ use osb_audio::{
     StreamingMonoResampler, UtteranceSegment, VadConfig, VadSegmenter,
 };
 use osb_core::audio::{AudioFormat, ChannelLayout, SampleRate};
-use osb_core::config::EngineConfig;
+use osb_core::config::{EngineConfig, VadConfigParams};
 use osb_core::error::{EngineError, Error, Result};
 use osb_protocol::capability::Capability;
 use osb_protocol::engine::EngineId;
@@ -89,6 +90,10 @@ pub struct PipelineConfig {
     pub target_language: String,
     /// Optional TTS voice identifier
     pub voice_id: Option<String>,
+    /// Enable clause-chunked incremental TTS synthesis (M5 time-to-first-audio optimization)
+    pub chunked_tts: bool,
+    /// Minimum words per clause before splitting on `,` / `;` / `:` boundaries
+    pub min_clause_words: usize,
     /// VAD endpointing parameters
     pub vad: VadConfig,
 }
@@ -104,8 +109,27 @@ impl Default for PipelineConfig {
             source_language: "pt-BR".to_string(),
             target_language: "en-US".to_string(),
             voice_id: None,
+            chunked_tts: true,
+            min_clause_words: 3,
             vad: VadConfig::default(),
         }
+    }
+}
+
+impl PipelineConfig {
+    /// Apply [`VadConfigParams`] from core configuration.
+    pub fn with_vad_params(mut self, params: VadConfigParams) -> Self {
+        self.vad = VadConfig {
+            sample_rate: self.engine_format.sample_rate.hz(),
+            frame_ms: params.frame_ms,
+            start_rms_threshold: params.start_rms_threshold,
+            continue_rms_threshold: params.continue_rms_threshold,
+            pre_roll_frames: params.pre_roll_frames,
+            min_speech_ms: params.min_speech_ms,
+            end_silence_ms: params.end_silence_ms,
+            max_utterance_ms: params.max_utterance_ms,
+        };
+        self
     }
 }
 
@@ -120,12 +144,16 @@ pub struct TranslatedUtterance {
     pub output_format: AudioFormat,
     /// In-memory translated text (never persisted or logged by default)
     pub translated_text: Option<String>,
+    /// Number of TTS clauses synthesized for this utterance
+    pub clauses_synthesized: usize,
     /// STT / direct speech-translation stage wall time in ms
     pub speech_stage_ms: u64,
     /// Optional text-translation stage wall time in ms
     pub mt_stage_ms: u64,
-    /// TTS stage wall time in ms
+    /// Total TTS stage wall time in ms across all clauses
     pub tts_stage_ms: u64,
+    /// Time-to-first-audio (TTFA) wall time in ms when the first synthesized clause was ready
+    pub first_audio_ms: u64,
     /// End-to-end utterance processing wall time in ms
     pub total_ms: u64,
 }
@@ -149,8 +177,59 @@ pub struct PipelineMetricsSnapshot {
     pub last_mt_stage_ms: u64,
     /// Most recent TTS synthesis latency in ms
     pub last_tts_stage_ms: u64,
+    /// Most recent time-to-first-audio (first TTS clause ready) in ms
+    pub last_first_audio_ms: u64,
     /// Most recent total utterance turnaround latency in ms
     pub last_total_ms: u64,
+}
+
+/// Split translated text into incremental TTS clauses at punctuation boundaries.
+///
+/// Sentence terminators (`.`, `!`, `?`) always close a clause.
+/// Intra-sentence delimiters (`,`, `;`, `:`, `—`) close a clause once at least
+/// `min_clause_words` words have been accumulated, enabling earlier first-audio
+/// emission while subsequent clauses synthesize.
+pub fn split_text_into_tts_clauses(text: &str, min_clause_words: usize) -> Vec<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    let min_words = min_clause_words.max(1);
+    let mut clauses: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut word_count = 0usize;
+
+    for token in trimmed.split_whitespace() {
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(token);
+        word_count += 1;
+
+        let last_char = token.trim_end_matches(['"', '\'', ')', ']']).chars().last();
+
+        let is_sentence_end = matches!(last_char, Some('.' | '!' | '?'));
+        let is_clause_delim = matches!(last_char, Some(',' | ';' | ':' | '—'));
+
+        if is_sentence_end || (is_clause_delim && word_count >= min_words) {
+            clauses.push(std::mem::take(&mut current));
+            word_count = 0;
+        }
+    }
+
+    if !current.is_empty() {
+        if word_count == 1 && current.len() <= 2 && !clauses.is_empty() {
+            if let Some(last) = clauses.last_mut() {
+                last.push(' ');
+                last.push_str(&current);
+            }
+        } else {
+            clauses.push(current);
+        }
+    }
+
+    clauses
 }
 
 /// Stateful non-RT audio translation pipeline.
@@ -204,6 +283,7 @@ impl Pipeline {
         info!(
             source = %self.config.source_language,
             target = %self.config.target_language,
+            chunked_tts = self.config.chunked_tts,
             "starting processing pipeline"
         );
         self.ensure_input_resampler()?;
@@ -227,14 +307,17 @@ impl Pipeline {
         supervisor: &EngineSupervisor,
         engine_cfg: Option<&EngineConfig>,
     ) -> Result<PipelineRoute> {
+        let src_str = self.config.source_language.as_str();
+        let dst_str = self.config.target_language.as_str();
+
         if let Some(cfg) = engine_cfg {
-            if let Some(explicit) = resolve_explicit_route(cfg) {
+            if let Some(explicit) = resolve_explicit_route(supervisor, cfg, src_str, dst_str) {
                 return Ok(explicit);
             }
         }
 
-        let src = Some(self.config.source_language.as_str());
-        let dst = Some(self.config.target_language.as_str());
+        let src = Some(src_str);
+        let dst = Some(dst_str);
 
         if let (Ok(st_id), Ok(tts_id)) = (
             supervisor.negotiate_capability(&[Capability::SpeechTranslation], src, dst),
@@ -315,6 +398,7 @@ impl Pipeline {
                     speech_translation_engine,
                     tts_engine,
                     segment,
+                    started,
                 )
                 .await
             }
@@ -324,17 +408,17 @@ impl Pipeline {
                 tts_engine,
             } => {
                 self.execute_cascaded_stt_mt_tts(
-                    supervisor, stt_engine, mt_engine, tts_engine, segment,
+                    supervisor, stt_engine, mt_engine, tts_engine, segment, started,
                 )
                 .await
             }
             PipelineRoute::EndToEndS2s { s2s_engine } => {
-                self.execute_end_to_end_s2s(supervisor, s2s_engine, segment)
+                self.execute_end_to_end_s2s(supervisor, s2s_engine, segment, started)
                     .await
             }
         };
 
-        let Some(raw) = (match outcome {
+        let Some(synth) = (match outcome {
             Ok(opt) => opt,
             Err(err) => {
                 self.metrics.utterances_failed += 1;
@@ -345,42 +429,43 @@ impl Pipeline {
             return Ok(None);
         };
 
-        let output_samples = format_output_audio(
-            &raw.mono_samples,
-            SampleRate::new(raw.sample_rate),
-            self.config.output_format,
-        )?;
         let total_ms = started.elapsed().as_millis() as u64;
+        let first_audio_ms = synth.first_audio_ms.min(total_ms);
 
         self.metrics.utterances_processed += 1;
-        self.metrics.last_speech_stage_ms = raw.speech_ms;
-        self.metrics.last_mt_stage_ms = raw.mt_ms;
-        self.metrics.last_tts_stage_ms = raw.tts_ms;
+        self.metrics.last_speech_stage_ms = synth.speech_ms;
+        self.metrics.last_mt_stage_ms = synth.mt_ms;
+        self.metrics.last_tts_stage_ms = synth.tts_ms;
+        self.metrics.last_first_audio_ms = first_audio_ms;
         self.metrics.last_total_ms = total_ms;
 
         debug!(
             utterance_id = segment.utterance_id,
             input_ms = segment.duration_ms(),
-            speech_ms = raw.speech_ms,
-            mt_ms = raw.mt_ms,
-            tts_ms = raw.tts_ms,
+            clauses = synth.clauses_synthesized,
+            speech_ms = synth.speech_ms,
+            mt_ms = synth.mt_ms,
+            tts_ms = synth.tts_ms,
+            first_audio_ms,
             total_ms,
             "completed utterance translation"
         );
 
         Ok(Some(TranslatedUtterance {
             utterance_id: segment.utterance_id,
-            output_samples,
+            output_samples: synth.output_samples,
             output_format: self.config.output_format,
-            translated_text: raw.translated_text,
-            speech_stage_ms: raw.speech_ms,
-            mt_stage_ms: raw.mt_ms,
-            tts_stage_ms: raw.tts_ms,
+            translated_text: synth.translated_text,
+            clauses_synthesized: synth.clauses_synthesized,
+            speech_stage_ms: synth.speech_ms,
+            mt_stage_ms: synth.mt_ms,
+            tts_stage_ms: synth.tts_ms,
+            first_audio_ms,
             total_ms,
         }))
     }
 
-    /// Run a continuous non-RT bridge draining `capture_rx` and writing translated audio to `output_tx`.
+    /// Run a continuous non-RT bridge draining `capture_rx` and streaming translated clauses to `output_tx`.
     pub async fn run_ring_bridge(
         &mut self,
         supervisor: Arc<Mutex<EngineSupervisor>>,
@@ -411,18 +496,11 @@ impl Pipeline {
                         }
                         let segments = self.ingest_interleaved(&read_buf[..popped])?;
                         for seg in segments {
-                            let res = {
-                                let mut sup = supervisor.lock().await;
-                                self.process_utterance(&mut sup, &route, &seg).await
-                            };
-                            match res {
-                                Ok(Some(translated)) => {
-                                    self.push_to_output_ring(&mut output_tx, &translated.output_samples).await;
-                                }
-                                Ok(None) => {}
-                                Err(err) => {
-                                    warn!(utterance_id = seg.utterance_id, error = %err, "utterance translation failed; continuing stream");
-                                }
+                            if let Err(err) = self
+                                .stream_utterance_to_output_ring(&supervisor, &route, &seg, &mut output_tx)
+                                .await
+                            {
+                                warn!(utterance_id = seg.utterance_id, error = %err, "utterance translation failed; continuing stream");
                             }
                         }
                     }
@@ -431,6 +509,154 @@ impl Pipeline {
         }
 
         self.stop()?;
+        Ok(())
+    }
+
+    async fn stream_utterance_to_output_ring(
+        &mut self,
+        supervisor: &Arc<Mutex<EngineSupervisor>>,
+        route: &PipelineRoute,
+        segment: &UtteranceSegment,
+        output_tx: &mut AudioRingProducer,
+    ) -> Result<()> {
+        let started = Instant::now();
+
+        match route {
+            PipelineRoute::EndToEndS2s { .. } => {
+                let res = {
+                    let mut sup = supervisor.lock().await;
+                    self.process_utterance(&mut sup, route, segment).await
+                };
+                if let Some(translated) = res? {
+                    self.push_to_output_ring(output_tx, &translated.output_samples)
+                        .await;
+                }
+                Ok(())
+            }
+            PipelineRoute::DirectSpeechTranslation {
+                speech_translation_engine,
+                tts_engine,
+            } => {
+                let (text, speech_ms) = {
+                    let mut sup = supervisor.lock().await;
+                    match self
+                        .request_speech_translation(&mut sup, speech_translation_engine, segment)
+                        .await
+                    {
+                        Ok(v) => v,
+                        Err(e) => {
+                            self.metrics.utterances_failed += 1;
+                            return Err(e);
+                        }
+                    }
+                };
+                if text.trim().is_empty() {
+                    self.metrics.utterances_empty_skipped += 1;
+                    return Ok(());
+                }
+                self.stream_tts_clauses_to_ring(
+                    supervisor, tts_engine, &text, speech_ms, 0, started, output_tx,
+                )
+                .await
+            }
+            PipelineRoute::CascadedSttMtTts {
+                stt_engine,
+                mt_engine,
+                tts_engine,
+            } => {
+                let (transcript, speech_ms) = {
+                    let mut sup = supervisor.lock().await;
+                    match self.request_stt(&mut sup, stt_engine, segment).await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            self.metrics.utterances_failed += 1;
+                            return Err(e);
+                        }
+                    }
+                };
+                if transcript.trim().is_empty() {
+                    self.metrics.utterances_empty_skipped += 1;
+                    return Ok(());
+                }
+                let (translated, mt_ms) = {
+                    let mut sup = supervisor.lock().await;
+                    match self.request_mt(&mut sup, mt_engine, &transcript).await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            self.metrics.utterances_failed += 1;
+                            return Err(e);
+                        }
+                    }
+                };
+                if translated.trim().is_empty() {
+                    self.metrics.utterances_empty_skipped += 1;
+                    return Ok(());
+                }
+                self.stream_tts_clauses_to_ring(
+                    supervisor,
+                    tts_engine,
+                    &translated,
+                    speech_ms,
+                    mt_ms,
+                    started,
+                    output_tx,
+                )
+                .await
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn stream_tts_clauses_to_ring(
+        &mut self,
+        supervisor: &Arc<Mutex<EngineSupervisor>>,
+        tts_engine: &EngineId,
+        text: &str,
+        speech_ms: u64,
+        mt_ms: u64,
+        started: Instant,
+        output_tx: &mut AudioRingProducer,
+    ) -> Result<()> {
+        let clauses = self.clauses_for_text(text);
+        let mut tts_ms_total = 0u64;
+        let mut first_audio_ms = 0u64;
+
+        for (idx, clause) in clauses.iter().enumerate() {
+            let (mono_samples, sr, clause_ms) = {
+                let mut sup = supervisor.lock().await;
+                match self.synthesize_tts(&mut sup, tts_engine, clause).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        self.metrics.utterances_failed += 1;
+                        return Err(e);
+                    }
+                }
+            };
+            tts_ms_total += clause_ms;
+            if !mono_samples.is_empty() {
+                let formatted = format_output_audio(
+                    &mono_samples,
+                    SampleRate::new(sr),
+                    self.config.output_format,
+                )?;
+                if idx == 0 || first_audio_ms == 0 {
+                    first_audio_ms = started.elapsed().as_millis() as u64;
+                }
+                // Emit clause immediately into the SPSC ring buffer before synthesizing next clause!
+                self.push_to_output_ring(output_tx, &formatted).await;
+            }
+        }
+
+        let total_ms = started.elapsed().as_millis() as u64;
+        if first_audio_ms == 0 {
+            first_audio_ms = total_ms;
+        }
+        self.metrics.utterances_processed += 1;
+        self.metrics.last_speech_stage_ms = speech_ms;
+        self.metrics.last_mt_stage_ms = mt_ms;
+        self.metrics.last_tts_stage_ms = tts_ms_total;
+        self.metrics.last_first_audio_ms = first_audio_ms;
+        self.metrics.last_total_ms = total_ms;
         Ok(())
     }
 
@@ -447,7 +673,6 @@ impl Pipeline {
             self.metrics.output_frames_emitted += (written / out_ch) as u64;
 
             if written < slice.len() {
-                // Brief non-RT yield to allow PipeWire output consumer to drain before dropping tail.
                 tokio::time::sleep(Duration::from_millis(15)).await;
                 let retry = output_tx.push(&slice[written..]);
                 self.metrics.output_frames_emitted += (retry / out_ch) as u64;
@@ -473,24 +698,31 @@ impl Pipeline {
         self.next_request_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    async fn execute_direct_speech_translation(
+    fn clauses_for_text(&self, text: &str) -> Vec<String> {
+        if self.config.chunked_tts {
+            let split = split_text_into_tts_clauses(text, self.config.min_clause_words);
+            if !split.is_empty() {
+                return split;
+            }
+        }
+        vec![text.trim().to_string()]
+    }
+
+    async fn request_speech_translation(
         &self,
         supervisor: &mut EngineSupervisor,
         st_engine: &EngineId,
-        tts_engine: &EngineId,
         segment: &UtteranceSegment,
-    ) -> Result<Option<RawSynthesis>> {
+    ) -> Result<(String, u64)> {
         let st_started = Instant::now();
-        let req_id = self.next_id();
         let flags = FrameFlags::SPEECH_START
             .union(FrameFlags::SPEECH_END)
             .union(FrameFlags::END_OF_UTTERANCE);
-
         let resp = supervisor
             .send_request_with_flags(
                 st_engine,
                 EngineRequest::ProcessSpeechTranslation {
-                    request_id: req_id,
+                    request_id: self.next_id(),
                     audio: segment.samples.clone(),
                     sample_rate: segment.sample_rate,
                     source_lang: self.config.source_language.clone(),
@@ -509,33 +741,16 @@ impl Pipeline {
             )
             .await?;
         let speech_ms = st_started.elapsed().as_millis() as u64;
-
         let text = extract_speech_translation_text(st_engine, resp)?;
-        if text.trim().is_empty() {
-            return Ok(None);
-        }
-
-        let (mono_samples, sample_rate, tts_ms) =
-            self.synthesize_tts(supervisor, tts_engine, &text).await?;
-
-        Ok(Some(RawSynthesis {
-            mono_samples,
-            sample_rate,
-            translated_text: Some(text),
-            speech_ms,
-            mt_ms: 0,
-            tts_ms,
-        }))
+        Ok((text, speech_ms))
     }
 
-    async fn execute_cascaded_stt_mt_tts(
+    async fn request_stt(
         &self,
         supervisor: &mut EngineSupervisor,
         stt_engine: &EngineId,
-        mt_engine: &EngineId,
-        tts_engine: &EngineId,
         segment: &UtteranceSegment,
-    ) -> Result<Option<RawSynthesis>> {
+    ) -> Result<(String, u64)> {
         let stt_started = Instant::now();
         let stt_resp = supervisor
             .send_request_with_flags(
@@ -551,42 +766,128 @@ impl Pipeline {
             )
             .await?;
         let speech_ms = stt_started.elapsed().as_millis() as u64;
-
         let transcript = extract_stt_text(stt_engine, stt_resp)?;
-        if transcript.trim().is_empty() {
-            return Ok(None);
-        }
+        Ok((transcript, speech_ms))
+    }
 
+    async fn request_mt(
+        &self,
+        supervisor: &mut EngineSupervisor,
+        mt_engine: &EngineId,
+        transcript: &str,
+    ) -> Result<(String, u64)> {
         let mt_started = Instant::now();
         let mt_resp = supervisor
             .send_request(
                 mt_engine,
                 EngineRequest::ProcessTranslation {
                     request_id: self.next_id(),
-                    text: transcript,
+                    text: transcript.to_string(),
                     source_lang: self.config.source_language.clone(),
                     target_lang: self.config.target_language.clone(),
                 },
             )
             .await?;
         let mt_ms = mt_started.elapsed().as_millis() as u64;
-
         let translated = extract_mt_text(mt_engine, mt_resp)?;
+        Ok((translated, mt_ms))
+    }
+
+    async fn synthesize_clauses_formatted(
+        &self,
+        supervisor: &mut EngineSupervisor,
+        tts_engine: &EngineId,
+        text: &str,
+        started: Instant,
+    ) -> Result<(Vec<f32>, u64, u64, usize)> {
+        let clauses = self.clauses_for_text(text);
+        let mut combined_output = Vec::new();
+        let mut tts_ms_total = 0u64;
+        let mut first_audio_ms = 0u64;
+
+        for (idx, clause) in clauses.iter().enumerate() {
+            let (mono_samples, sample_rate, clause_ms) =
+                self.synthesize_tts(supervisor, tts_engine, clause).await?;
+            tts_ms_total += clause_ms;
+            if !mono_samples.is_empty() {
+                let formatted = format_output_audio(
+                    &mono_samples,
+                    SampleRate::new(sample_rate),
+                    self.config.output_format,
+                )?;
+                if idx == 0 || first_audio_ms == 0 {
+                    first_audio_ms = started.elapsed().as_millis() as u64;
+                }
+                combined_output.extend_from_slice(&formatted);
+            }
+        }
+        if first_audio_ms == 0 {
+            first_audio_ms = started.elapsed().as_millis() as u64;
+        }
+        Ok((combined_output, tts_ms_total, first_audio_ms, clauses.len()))
+    }
+
+    async fn execute_direct_speech_translation(
+        &self,
+        supervisor: &mut EngineSupervisor,
+        st_engine: &EngineId,
+        tts_engine: &EngineId,
+        segment: &UtteranceSegment,
+        started: Instant,
+    ) -> Result<Option<FormattedSynthesis>> {
+        let (text, speech_ms) = self
+            .request_speech_translation(supervisor, st_engine, segment)
+            .await?;
+        if text.trim().is_empty() {
+            return Ok(None);
+        }
+
+        let (output_samples, tts_ms, first_audio_ms, clauses_synthesized) = self
+            .synthesize_clauses_formatted(supervisor, tts_engine, &text, started)
+            .await?;
+
+        Ok(Some(FormattedSynthesis {
+            output_samples,
+            translated_text: Some(text),
+            clauses_synthesized,
+            speech_ms,
+            mt_ms: 0,
+            tts_ms,
+            first_audio_ms,
+        }))
+    }
+
+    async fn execute_cascaded_stt_mt_tts(
+        &self,
+        supervisor: &mut EngineSupervisor,
+        stt_engine: &EngineId,
+        mt_engine: &EngineId,
+        tts_engine: &EngineId,
+        segment: &UtteranceSegment,
+        started: Instant,
+    ) -> Result<Option<FormattedSynthesis>> {
+        let (transcript, speech_ms) = self.request_stt(supervisor, stt_engine, segment).await?;
+        if transcript.trim().is_empty() {
+            return Ok(None);
+        }
+
+        let (translated, mt_ms) = self.request_mt(supervisor, mt_engine, &transcript).await?;
         if translated.trim().is_empty() {
             return Ok(None);
         }
 
-        let (mono_samples, sample_rate, tts_ms) = self
-            .synthesize_tts(supervisor, tts_engine, &translated)
+        let (output_samples, tts_ms, first_audio_ms, clauses_synthesized) = self
+            .synthesize_clauses_formatted(supervisor, tts_engine, &translated, started)
             .await?;
 
-        Ok(Some(RawSynthesis {
-            mono_samples,
-            sample_rate,
+        Ok(Some(FormattedSynthesis {
+            output_samples,
             translated_text: Some(translated),
+            clauses_synthesized,
             speech_ms,
             mt_ms,
             tts_ms,
+            first_audio_ms,
         }))
     }
 
@@ -595,7 +896,8 @@ impl Pipeline {
         supervisor: &mut EngineSupervisor,
         s2s_engine: &EngineId,
         segment: &UtteranceSegment,
-    ) -> Result<Option<RawSynthesis>> {
+        started: Instant,
+    ) -> Result<Option<FormattedSynthesis>> {
         let s2s_started = Instant::now();
         let resp = supervisor
             .send_request_with_flags(
@@ -620,13 +922,20 @@ impl Pipeline {
                     if data.audio.is_empty() {
                         return Ok(None);
                     }
-                    Ok(Some(RawSynthesis {
-                        mono_samples: data.audio,
-                        sample_rate: data.sample_rate,
+                    let output_samples = format_output_audio(
+                        &data.audio,
+                        SampleRate::new(data.sample_rate),
+                        self.config.output_format,
+                    )?;
+                    let first_audio_ms = started.elapsed().as_millis() as u64;
+                    Ok(Some(FormattedSynthesis {
+                        output_samples,
                         translated_text: data.translation,
+                        clauses_synthesized: 1,
                         speech_ms: total,
                         mt_ms: 0,
                         tts_ms: 0,
+                        first_audio_ms,
                     }))
                 }
                 ProcessingResult::Failed { code, message } => Err(Error::Engine(
@@ -687,37 +996,63 @@ impl Default for Pipeline {
     }
 }
 
-struct RawSynthesis {
-    mono_samples: Vec<f32>,
-    sample_rate: u32,
+struct FormattedSynthesis {
+    output_samples: Vec<f32>,
     translated_text: Option<String>,
+    clauses_synthesized: usize,
     speech_ms: u64,
     mt_ms: u64,
     tts_ms: u64,
+    first_audio_ms: u64,
 }
 
-fn resolve_explicit_route(cfg: &EngineConfig) -> Option<PipelineRoute> {
+fn resolve_explicit_route(
+    supervisor: &EngineSupervisor,
+    cfg: &EngineConfig,
+    src: &str,
+    dst: &str,
+) -> Option<PipelineRoute> {
     if let Some(ref s2s) = cfg.s2s_engine {
-        return Some(PipelineRoute::EndToEndS2s {
-            s2s_engine: EngineId::new(s2s),
-        });
+        let id = EngineId::new(s2s);
+        if engine_supports_pair(supervisor, &id, src, dst) {
+            return Some(PipelineRoute::EndToEndS2s { s2s_engine: id });
+        }
     }
     if let (Some(ref st), Some(ref tts)) = (&cfg.speech_translation_engine, &cfg.tts_engine) {
-        return Some(PipelineRoute::DirectSpeechTranslation {
-            speech_translation_engine: EngineId::new(st),
-            tts_engine: EngineId::new(tts),
-        });
+        let st_id = EngineId::new(st);
+        if engine_supports_pair(supervisor, &st_id, src, dst) {
+            return Some(PipelineRoute::DirectSpeechTranslation {
+                speech_translation_engine: st_id,
+                tts_engine: EngineId::new(tts),
+            });
+        }
     }
     if let (Some(ref stt), Some(ref mt), Some(ref tts)) =
         (&cfg.stt_engine, &cfg.translation_engine, &cfg.tts_engine)
     {
-        return Some(PipelineRoute::CascadedSttMtTts {
-            stt_engine: EngineId::new(stt),
-            mt_engine: EngineId::new(mt),
-            tts_engine: EngineId::new(tts),
-        });
+        let mt_id = EngineId::new(mt);
+        if engine_supports_pair(supervisor, &mt_id, src, dst) {
+            return Some(PipelineRoute::CascadedSttMtTts {
+                stt_engine: EngineId::new(stt),
+                mt_engine: mt_id,
+                tts_engine: EngineId::new(tts),
+            });
+        }
     }
     None
+}
+
+fn engine_supports_pair(
+    supervisor: &EngineSupervisor,
+    id: &EngineId,
+    src: &str,
+    dst: &str,
+) -> bool {
+    let Some(info) = supervisor.get_info(id) else {
+        return true;
+    };
+    info.capabilities.language_pairs().is_empty()
+        || info.capabilities.supports_translation(src, dst)
 }
 
 fn to_mono_samples(samples: &[f32], layout: ChannelLayout) -> Vec<f32> {
@@ -845,6 +1180,28 @@ mod tests {
         assert!(!pipeline.is_running());
     }
 
+    #[test]
+    fn test_split_text_into_tts_clauses() {
+        let clauses =
+            split_text_into_tts_clauses("He set up a little campaign without wire, he said.", 3);
+        assert_eq!(
+            clauses,
+            vec![
+                "He set up a little campaign without wire,".to_string(),
+                "he said.".to_string()
+            ]
+        );
+
+        let multi = split_text_into_tts_clauses("Hello team, can you hear me? We are live now!", 3);
+        assert_eq!(
+            multi,
+            vec![
+                "Hello team, can you hear me?".to_string(),
+                "We are live now!".to_string()
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn test_pipeline_direct_speech_translation_and_ring_bridge() {
         let mut supervisor = EngineSupervisor::new();
@@ -882,15 +1239,17 @@ mod tests {
         assert!(metrics.output_frames_emitted > 0);
 
         let mut drained = vec![0.0f32; 8_192];
-        let read_samples = out_rx.pop(&mut drained);
-        assert!(read_samples > 0);
-        assert!(drained[..read_samples].iter().any(|s| s.abs() > 0.01));
+        let count = out_rx.pop(&mut drained);
+        assert!(count > 0);
+        assert!(drained[..count].iter().any(|s| s.abs() > 0.01));
 
-        // Also verify direct route negotiation
         let route = pipeline.negotiate_route(&*sup.lock().await, None).unwrap();
-        assert!(matches!(
+        assert_eq!(
             route,
-            PipelineRoute::DirectSpeechTranslation { .. }
-        ));
+            PipelineRoute::DirectSpeechTranslation {
+                speech_translation_engine: EngineId::new("mock"),
+                tts_engine: EngineId::new("mock"),
+            }
+        );
     }
 }

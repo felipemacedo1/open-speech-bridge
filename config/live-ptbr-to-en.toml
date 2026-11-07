@@ -1,0 +1,72 @@
+# OpenSpeechBridge — Live PT-BR -> EN Voice Call Profile
+#
+# Usage:
+#   cargo run --bin openspeechbridge -- run --config config/live-ptbr-to-en.toml
+#
+# In Discord / Google Meet / Zoom / Teams:
+#   Select "OpenSpeechBridge" as your Microphone input device.
+
+[audio]
+input_device = ""
+output_device = ""
+virtual_mic_name = "OpenSpeechBridge"
+virtual_sink_name = "OpenSpeechBridge Incoming"
+enable_virtual_mic = true
+enable_virtual_sink = false
+buffer_ms = 20
+target_latency_ms = 50
+
+[audio.vad]
+frame_ms = 20
+start_rms_threshold = 0.014
+continue_rms_threshold = 0.007
+pre_roll_frames = 6
+min_speech_ms = 180
+end_silence_ms = 340
+max_utterance_ms = 12000
+
+[engine]
+source_language = "pt-BR"
+target_language = "en-US"
+speech_translation_engine = "faster-whisper"
+tts_engine = "kokoro-tts"
+voice_id = "af_heart"
+chunked_tts = true
+min_clause_words = 3
+enable_incoming = false
+prefer_gpu = false
+startup_timeout_ms = 60000
+processing_timeout_ms = 30000
+
+[[engine.workers]]
+id = "faster-whisper"
+name = "Faster-Whisper Small (CPU int8)"
+program = "tools/benchmark/.venv/bin/python"
+args = [
+    "engines/sdk-python/osb_engine_sdk/workers/faster_whisper_worker.py",
+    "--engine-id", "faster-whisper",
+    "--model", "small",
+    "--compute-type", "int8",
+    "--threads", "4",
+]
+max_restarts = 3
+
+[[engine.workers]]
+id = "kokoro-tts"
+name = "Kokoro-82M TTS (CPU 24kHz)"
+program = "tools/benchmark/.venv/bin/python"
+args = [
+    "engines/sdk-python/osb_engine_sdk/workers/kokoro_worker.py",
+    "--engine-id", "kokoro-tts",
+    "--voice", "af_heart",
+    "--threads", "4",
+]
+max_restarts = 3
+
+[logging]
+level = "info"
+json = false
+
+[metrics]
+enabled = true
+prometheus_port = 0

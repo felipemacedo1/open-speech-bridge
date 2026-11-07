@@ -100,8 +100,12 @@ class FasterWhisperWorker(BaseEngineWorker):
             "num_workers": 1,
             "local_files_only": self.offline,
         }
-        if self.download_root:
+        if self.download_root and os.path.isdir(self.download_root):
             kwargs["download_root"] = self.download_root
+        else:
+            local_cache = _SDK_ROOT.parents[1] / "tools" / "benchmark" / ".cache" / f"faster-whisper-{self.model_name}"
+            if local_cache.is_dir():
+                kwargs["download_root"] = str(local_cache)
 
         self._model = WhisperModel(self.model_name, **kwargs)
 

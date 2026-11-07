@@ -68,35 +68,35 @@ Goal: Complete PT-BR → EN translation pipeline.
 
 **Success Criteria**: User speaks Portuguese, virtual mic / output produces English speech locally offline. *(Validated end-to-end offline on AC power via `openspeechbridge translate` on PT-BR FLEURS speech: `3.03 s` warm turnaround / `0.601x` RTF; live virtual-mic call listening remains recommended alongside M1 physical call acceptance.)*
 
-## Milestone 4: Full Duplex
+## Milestone 4: Full Duplex ✅
 
-**Status: Planned**
+**Status: Complete (Incoming Virtual Sink + Bidirectional PT-BR ↔ EN Pipeline)**
 
 Goal: Simultaneous incoming and outgoing translation.
 
-- [ ] Virtual sink for capturing app audio
-- [ ] Incoming audio pipeline
-- [ ] Echo cancellation consideration
-- [ ] Barge-in handling
-- [ ] Adaptive buffering
-- [ ] Per-direction language config
+- [x] Virtual sink for capturing app audio (`VirtualSink` `"OpenSpeechBridge Incoming"` in `osb-pipewire`)
+- [x] Incoming audio pipeline (`VirtualSink -> VadSegmenter -> CascadedSttMtTts -> PlaybackStream`)
+- [x] Echo cancellation consideration (dedicated virtual source `"OpenSpeechBridge"` vs. virtual sink `"OpenSpeechBridge Incoming"` + physical `PlaybackStream` isolation)
+- [x] Barge-in handling (concurrent independent `OutgoingBridge` and `IncomingBridge` releasing supervisor lock between stages/clauses)
+- [x] Adaptive buffering (bounded SPSC `AudioRingBuffer` + `VadConfigParams` TOML tuning)
+- [x] Per-direction language config (`source_language`/`target_language`, `voice_id`/`incoming_voice_id`, `enable_incoming` in `config/full-duplex-ptbr-en.toml`)
 
-**Success Criteria**: Two-way conversation translation in a voice call.
+**Success Criteria**: Two-way conversation translation in a voice call. *(Validated with `config/full-duplex-ptbr-en.toml` live PipeWire bridge and offline `EN -> PT-BR` round-trip via `faster-whisper` STT + `text-translator` + `Kokoro` PT-BR TTS.)*
 
-## Milestone 5: Streaming Optimization
+## Milestone 5: Streaming Optimization 🔨
 
-**Status: Planned**
+**Status: In Progress (Clause-Chunked Streaming TTS Implemented)**
 
 Goal: Low-latency incremental processing.
 
 - [ ] Streaming STT (partial results)
 - [ ] Streaming translation
-- [ ] Streaming TTS
-- [ ] Time-to-first-audio optimization
-- [ ] Latency benchmarks
-- [ ] Quality vs latency tradeoffs
+- [x] Streaming TTS (`split_text_into_tts_clauses` + incremental clause-by-clause SPSC ring push in `Pipeline::stream_tts_clauses_to_ring`)
+- [x] Time-to-first-audio optimization (`first_audio_ms` / `last_first_audio_ms` tracking; TTS TTFA reduced to `1.38 s` after speech translation on `short_01.wav`)
+- [x] Latency benchmarks (`translate --format json` reporting `first_audio_ms`, `clauses_synthesized`, `total_turnaround_ms`)
+- [x] Quality vs latency tradeoffs (`chunked_tts` and `min_clause_words` configurable per profile)
 
-**Success Criteria**: Translated audio begins while source is still speaking.
+**Success Criteria**: Translated audio begins while source is still speaking. *(Clause-level streaming TTS emits first audio `676 ms` before full utterance synthesis completes; sub-utterance streaming STT partials remain planned.)*
 
 ## Milestone 6: Voice Preservation
 
