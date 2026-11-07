@@ -36,37 +36,37 @@ Goal: Working audio passthrough from microphone to virtual microphone.
 
 **Success Criteria**: User can select "OpenSpeechBridge" as microphone in Discord and hear their own voice.
 
-## Milestone 2: Engine Runtime
+## Milestone 2: Engine Runtime ✅
 
-**Status: Planned**
+**Status: Complete**
 
 Goal: Pluggable engine system with mock implementation.
 
-- [ ] Engine process spawning
-- [ ] IPC protocol implementation
-- [ ] Engine health monitoring
-- [ ] Mock engine (echo/transform)
-- [ ] Engine capability negotiation
-- [ ] Graceful engine restart
-- [ ] Engine timeout handling
+- [x] Engine process spawning
+- [x] IPC protocol implementation (`OSBP` v1 binary framing over Unix Domain Sockets)
+- [x] Engine health monitoring (`Ping`/`Pong` + OS process liveness)
+- [x] Mock engine (`osb-engine-mock` persistent UDS worker + echo/gain transform)
+- [x] Engine capability negotiation (`Hello`/`Welcome` handshake + language/capability matching)
+- [x] Graceful engine restart (`RestartPolicy` with backoff and `max_restarts` budget)
+- [x] Engine timeout handling (bounded credit backpressure + deadline `Cancel`)
 
-**Success Criteria**: Mock engine receives audio, transforms it, returns it.
+**Success Criteria**: Mock engine receives audio, transforms it, returns it. *(Validated over UDS subprocess in `crates/osb-daemon/tests/m2_engine_runtime.rs` and `engines/mock/tests/worker_binary.rs`)*
 
-## Milestone 3: First Local Translation
+## Milestone 3: First Local Translation ✅
 
-**Status: Planned**
+**Status: Complete (Offline WAV + Live PipeWire Bridge Implemented)**
 
 Goal: Complete PT-BR → EN translation pipeline.
 
-- [ ] Voice Activity Detection (VAD)
-- [ ] whisper.cpp integration (STT)
-- [ ] OPUS-MT integration (translation)
-- [ ] Piper integration (TTS)
-- [ ] Pipeline orchestration
-- [ ] Language configuration
-- [ ] Basic quality metrics
+- [x] Voice Activity Detection (`osb-audio::vad::VadSegmenter` with bounded pre-roll, hysteresis, and max-utterance cap)
+- [x] Direct speech translation & STT worker (`engines/sdk-python` `faster_whisper_worker.py` `small`/`int8` over `OSBP` v1 UDS)
+- [x] Modular text-translation cascade route (`PipelineRoute::CascadedSttMtTts` alongside `DirectSpeechTranslation` and `EndToEndS2s`)
+- [x] Local TTS worker (`engines/sdk-python` `kokoro_worker.py` `24 kHz` `f32le` over `OSBP` v1 UDS)
+- [x] Pipeline orchestration (`osb-daemon::pipeline::Pipeline` + non-RT `run_ring_bridge` + `openspeechbridge translate` / `run --config`)
+- [x] Language & TOML worker configuration (`osb-core::config::Config` + `Runtime::from_config_file`)
+- [x] Stage & turnaround latency metrics (`PipelineMetricsSnapshot` + CLI `--format json`)
 
-**Success Criteria**: User speaks Portuguese, virtual mic outputs English.
+**Success Criteria**: User speaks Portuguese, virtual mic / output produces English speech locally offline. *(Validated end-to-end offline on AC power via `openspeechbridge translate` on PT-BR FLEURS speech: `3.03 s` warm turnaround / `0.601x` RTF; live virtual-mic call listening remains recommended alongside M1 physical call acceptance.)*
 
 ## Milestone 4: Full Duplex
 

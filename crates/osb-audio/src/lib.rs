@@ -5,8 +5,8 @@
 //! This crate provides:
 //! - Lock-free ring buffers for real-time audio
 //! - Sample format conversion
-//! - Resampling utilities
-//! - Buffer management with backpressure
+//! - Resampling utilities (fixed-frame and arbitrary-length streaming)
+//! - Bounded Voice Activity Detection (VAD) and endpoint segmentation
 //!
 //! ## Design Principles
 //!
@@ -18,7 +18,11 @@
 pub mod buffer;
 pub mod convert;
 pub mod resample;
+pub mod vad;
 
-pub use buffer::{AudioBuffer, AudioRingBuffer, BoundedAudioBuffer};
+pub use buffer::{
+    AudioBuffer, AudioRingBuffer, AudioRingConsumer, AudioRingProducer, BoundedAudioBuffer,
+};
 pub use convert::{deinterleave, interleave, SampleConverter};
-pub use resample::Resampler;
+pub use resample::{resample_mono_buffer, Resampler, StreamingMonoResampler};
+pub use vad::{UtteranceSegment, VadConfig, VadSegmenter, VadState};

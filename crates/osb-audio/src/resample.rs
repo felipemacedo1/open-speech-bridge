@@ -186,6 +186,102 @@ pub fn output_frame_count(
     (input_frames as f64 * ratio).ceil() as usize
 }
 
+/// Stateful mono resampler accepting arbitrary chunk sizes without fixed-frame constraints.
+pub struct StreamingMonoResampler {
+    inner: Option<Resampler>,
+    input_rate: SampleRate,
+    output_rate: SampleRate,
+    residual: Vec<f32>,
+}
+
+impl StreamingMonoResampler {
+    /// Create a streaming mono resampler between `input_rate` and `output_rate`.
+    ///
+    /// When `input_rate == output_rate`, operates as a zero-overhead passthrough.
+    pub fn new(input_rate: SampleRate, output_rate: SampleRate, chunk_size: usize) -> Result<Self> {
+        if input_rate == output_rate {
+            return Ok(Self {
+                inner: None,
+                input_rate,
+                output_rate,
+                residual: Vec::new(),
+            });
+        }
+
+        let resampler = Resampler::new(input_rate, output_rate, 1, chunk_size.max(256))?;
+        let req = resampler.input_frames_required();
+        Ok(Self {
+            inner: Some(resampler),
+            input_rate,
+            output_rate,
+            residual: Vec::with_capacity(req * 2),
+        })
+    }
+
+    /// Feed an arbitrary slice of mono `f32` samples and emit available resampled samples.
+    pub fn push(&mut self, samples: &[f32]) -> Result<Vec<f32>> {
+        let Some(ref mut resampler) = self.inner else {
+            return Ok(samples.to_vec());
+        };
+
+        self.residual.extend_from_slice(samples);
+        let mut out = Vec::new();
+
+        loop {
+            let req = resampler.input_frames_required();
+            if self.residual.len() < req {
+                break;
+            }
+            let chunk: Vec<f32> = self.residual.drain(..req).collect();
+            let produced = resampler.process_interleaved(&chunk)?;
+            out.extend_from_slice(&produced);
+        }
+
+        Ok(out)
+    }
+
+    /// Flush any buffered tail samples by zero-padding the final block and trimming output.
+    pub fn flush(&mut self) -> Result<Vec<f32>> {
+        let Some(ref mut resampler) = self.inner else {
+            return Ok(std::mem::take(&mut self.residual));
+        };
+
+        if self.residual.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let tail_len = self.residual.len();
+        let expected_out = output_frame_count(tail_len, self.input_rate, self.output_rate);
+        let req = resampler.input_frames_required();
+
+        let mut padded = std::mem::take(&mut self.residual);
+        padded.resize(req, 0.0);
+        let mut produced = resampler.process_interleaved(&padded)?;
+        produced.truncate(expected_out);
+        resampler.reset();
+        Ok(produced)
+    }
+}
+
+/// Resample a complete mono `f32` buffer of arbitrary length from `input_rate` to `output_rate`.
+pub fn resample_mono_buffer(
+    samples: &[f32],
+    input_rate: SampleRate,
+    output_rate: SampleRate,
+) -> Result<Vec<f32>> {
+    if samples.is_empty() || input_rate == output_rate {
+        return Ok(samples.to_vec());
+    }
+
+    let expected_total = output_frame_count(samples.len(), input_rate, output_rate);
+    let mut streamer = StreamingMonoResampler::new(input_rate, output_rate, 1024)?;
+    let mut out = streamer.push(samples)?;
+    let tail = streamer.flush()?;
+    out.extend_from_slice(&tail);
+    out.truncate(expected_total);
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,5 +411,13 @@ mod tests {
 
         let output = resampler.process_interleaved(&input).unwrap();
         assert!(!output.is_empty());
+    }
+
+    #[test]
+    fn test_resample_mono_buffer_arbitrary_length_24k_to_48k() {
+        // Odd length (e.g. 3777 samples @ 24kHz -> 7554 samples @ 48kHz)
+        let input: Vec<f32> = (0..3_777).map(|i| (i as f32 * 0.02).sin() * 0.4).collect();
+        let out = resample_mono_buffer(&input, SampleRate::TTS_24K, SampleRate::PRO_48K).unwrap();
+        assert_eq!(out.len(), 7_554);
     }
 }

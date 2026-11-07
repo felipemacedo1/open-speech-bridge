@@ -5,7 +5,7 @@
 //! The daemon manages:
 //! - Audio capture and playback streams
 //! - Virtual audio devices
-//! - Engine lifecycle
+//! - Engine lifecycle and Unix Domain Socket worker supervision
 //! - Processing pipeline
 //! - Metrics collection
 //!
@@ -29,7 +29,18 @@
 
 pub mod audio_manager;
 pub mod engine_supervisor;
+pub mod ipc;
 pub mod pipeline;
 pub mod runtime;
+pub mod worker;
 
+pub use engine_supervisor::{
+    EngineHandler, EngineMetricsSnapshot, EngineSupervisor, RestartPolicy,
+};
+pub use ipc::{EngineRpcClient, IpcClientConfig};
+pub use pipeline::{
+    Pipeline, PipelineConfig, PipelineMetricsSnapshot, PipelineRoute, PipelineStage,
+    TranslatedUtterance,
+};
 pub use runtime::{Runtime, RuntimeConfig, RuntimeState};
+pub use worker::{ManagedWorker, WorkerSpec, WorkerTransport};
