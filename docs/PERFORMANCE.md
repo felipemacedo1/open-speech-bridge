@@ -73,13 +73,45 @@ Always document:
 
 ## Current Measurements
 
-> **Note**: No measurements available yet. This section will be updated as the project matures.
+### M1 demand-driven virtual source (2026-09-25)
 
-### Placeholder
+**Environment:** Ubuntu 24.04.5, x86_64, PipeWire 1.0.5, WirePlumber active,
+48 kHz stereo F32, default PipeWire quantum 1024.
+
+**Branch:** `fix/m1-pipewire-buffer-sync` (PR #14)
+
+| Scenario | VM callbacks | Buffer | Result |
+|---|---:|---:|---|
+| No application consumer, 8 s | 0 | 0% | Capture drained/discarded; no overflow |
+| `pw-record` consumer, 10 s | 251-275 observed | 12.5-25% | Source linked and drained |
+
+**Key observations:**
+- The virtual microphone only runs callbacks when an application is connected
+- Buffer utilization stays bounded even under sustained load
+- No overflow or underrun events during normal operation
+
+The connected-consumer run was captured while validating callback demand; its
+requested-frame counter was then corrected to use negotiated SPA chunk size
+instead of backing-buffer capacity. A 60-second soak test and full validation
+on physical Ubuntu are pending before final baseline.
+
+### Buffer RT Safety Validation
+
+The following guarantees are enforced in PipeWire callbacks:
+
+| Constraint | Status | Verification |
+|---|---|---|
+| No heap allocation | ✅ | Stack buffers only (`[f32; RT_BATCH_SIZE]`) |
+| No locks | ✅ | SPSC ring buffer via `rtrb` |
+| No blocking I/O | ✅ | No file/network ops in callback |
+| No logging | ✅ | `trace!` removed from capture callback |
+| Bounded operations | ✅ | RT_BATCH_SIZE=512 samples per iteration |
+
+### Placeholder - Full System Latency
 
 | Test | Hardware | Latency | Notes |
 |------|----------|---------|-------|
-| TBD | TBD | TBD | TBD |
+| TBD | TBD | TBD | Pending physical validation |
 
 ## Optimization Strategies
 

@@ -13,7 +13,9 @@ use tokio::signal;
 use tracing::info;
 
 #[cfg(target_os = "linux")]
-use osb_pipewire::linux::{CaptureStream, PipeWireContext, VirtualMicrophone};
+use osb_pipewire::linux::{
+    CaptureStream, PipeWireContext, VirtualMicMetricsSnapshot, VirtualMicrophone,
+};
 
 /// Loopback metrics for display.
 #[derive(Default)]
@@ -21,6 +23,10 @@ use osb_pipewire::linux::{CaptureStream, PipeWireContext, VirtualMicrophone};
 struct LoopbackMetrics {
     /// Total samples processed.
     samples_processed: u64,
+    /// Capture callback count.
+    capture_callbacks: u64,
+    /// Samples produced by capture.
+    capture_samples: u64,
     /// Buffer fill ratio (0.0 to 1.0).
     buffer_fill: f32,
     /// Number of buffer underruns.
@@ -29,6 +35,12 @@ struct LoopbackMetrics {
     overruns: u64,
     /// Estimated latency in milliseconds.
     latency_ms: f32,
+    /// Virtual microphone process callbacks observed.
+    virtual_callbacks: u64,
+    /// Frames requested by the virtual microphone.
+    virtual_frames_requested: u64,
+    /// Frames consumed by the virtual microphone.
+    virtual_frames_consumed: u64,
     /// Duration running.
     elapsed: Duration,
 }
@@ -43,7 +55,7 @@ impl LoopbackMetrics {
 fn print_metrics(metrics: &LoopbackMetrics, first_print: bool) {
     // Move cursor up if not first print
     if !first_print {
-        print!("\x1b[6A"); // Move up 6 lines
+        print!("\x1b[8A"); // Move up 8 lines
     }
 
     let buffer_bar = create_progress_bar(metrics.buffer_fill, 20);
@@ -60,6 +72,11 @@ fn print_metrics(metrics: &LoopbackMetrics, first_print: bool) {
         format_number(metrics.samples_processed)
     );
     println!(
+        "│ Capture cb: {:>10} samples: {:>9} │",
+        metrics.capture_callbacks,
+        format_number(metrics.capture_samples)
+    );
+    println!(
         "│ Buffer:  [{}] {:>5.1}%           │",
         buffer_bar,
         metrics.buffer_fill * 100.0
@@ -67,6 +84,14 @@ fn print_metrics(metrics: &LoopbackMetrics, first_print: bool) {
     println!(
         "│ Latency: {:>6.1} ms                          │",
         metrics.latency_ms
+    );
+    println!(
+        "│ VM callbacks: {:>10} requested: {:>8} │",
+        metrics.virtual_callbacks, metrics.virtual_frames_requested
+    );
+    println!(
+        "│ VM consumed: {:>10}                         │",
+        metrics.virtual_frames_consumed
     );
     println!("└─────────────────────────────────────────────┘");
 
@@ -201,6 +226,8 @@ async fn run_linux_loopback(device: &str, duration: u64, json_output: bool) -> R
     let mut metrics = LoopbackMetrics::new();
     let mut first_print = true;
     let mut transfer_buffer = vec![0.0f32; 1024];
+    let mut last_virtual_callbacks = 0u64;
+    let mut last_virtual_activity = None;
 
     // Main loop: transfer audio from capture consumer to virtual mic producer
     // This implements the loopback:
@@ -213,17 +240,32 @@ async fn run_linux_loopback(device: &str, duration: u64, json_output: bool) -> R
         // Both operations are lock-free (rtrb SPSC buffers)
         let read = capture_consumer.pop(&mut transfer_buffer);
         if read > 0 {
-            vmic_producer.push(&transfer_buffer[..read]);
-            metrics.samples_processed += read as u64;
+            // PipeWire sources are demand-driven. Drain capture continuously,
+            // but avoid building latency when no application consumes the node.
+            let snapshot = vmic.metrics();
+            if snapshot.callbacks != last_virtual_callbacks {
+                last_virtual_callbacks = snapshot.callbacks;
+                last_virtual_activity = Some(Instant::now());
+            }
+            if last_virtual_activity
+                .is_some_and(|time| time.elapsed() <= Duration::from_millis(250))
+            {
+                vmic_producer.push(&transfer_buffer[..read]);
+                metrics.samples_processed += read as u64;
+            }
         }
 
         // Update metrics
         metrics.elapsed = start_time.elapsed();
-        // Note: buffer_occupancy() returns 0 after start() since producer moved
-        // In production, we'd track this via atomic counters or metrics API
         metrics.buffer_fill = vmic_producer.occupancy().fill_ratio;
         metrics.latency_ms =
             (BUFFER_FRAMES as f32 / SAMPLE_RATE as f32) * 1000.0 * metrics.buffer_fill;
+        let snapshot: VirtualMicMetricsSnapshot = vmic.metrics();
+        metrics.virtual_callbacks = snapshot.callbacks;
+        metrics.virtual_frames_requested = snapshot.frames_requested;
+        metrics.virtual_frames_consumed = snapshot.frames_consumed;
+        metrics.capture_callbacks = capture.callbacks();
+        metrics.capture_samples = capture.samples_captured();
 
         // Print metrics (every 500ms)
         if !json_output && metrics.elapsed.as_millis() % 500 < 50 {
