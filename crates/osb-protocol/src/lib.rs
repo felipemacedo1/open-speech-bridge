@@ -14,11 +14,16 @@
 
 pub mod capability;
 pub mod engine;
+pub mod framing;
 pub mod message;
 
 pub use capability::{Capability, CapabilitySet, LanguagePair};
 pub use engine::{EngineId, EngineInfo, EngineState, EngineType};
-pub use message::{EngineRequest, EngineResponse, ProcessingResult};
+pub use framing::{FrameFlags, FrameLimits, FramePrefix, FramingError};
+pub use message::{
+    is_version_compatible, AudioFrameMeta, EngineRequest, EngineResponse, ProcessingResult,
+    SpeechTranslationOutput,
+};
 
 /// Protocol version.
 pub const PROTOCOL_VERSION: &str = "0.1.0";

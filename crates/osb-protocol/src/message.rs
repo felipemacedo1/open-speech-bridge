@@ -3,13 +3,38 @@
 //! These messages define the communication protocol for engine interactions.
 //! Messages are serialized as JSON for cross-process communication.
 
-use crate::engine::EngineId;
+use crate::engine::{EngineId, EngineInfo};
 use serde::{Deserialize, Serialize};
+
+/// Per-chunk audio stream metadata propagated across IPC boundaries.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioFrameMeta {
+    /// Logical conversation/session identifier
+    pub session_id: u64,
+    /// Utterance identifier within the session
+    pub utterance_id: u64,
+    /// Monotonically increasing chunk counter within the utterance
+    pub chunk_id: u64,
+    /// Capture monotonic timestamp in microseconds
+    pub timestamp_us: u64,
+    /// Number of interleaved audio channels (typically 1 for mono engine input)
+    pub channels: u16,
+}
 
 /// Request from runtime to engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EngineRequest {
+    /// Versioned transport handshake and flow-control negotiation
+    Hello {
+        /// Runtime protocol version (SemVer)
+        protocol_version: String,
+        /// Maximum concurrent in-flight requests allowed by the runtime
+        max_in_flight: u32,
+        /// Maximum binary PCM payload size in bytes accepted per frame
+        max_payload_bytes: u32,
+    },
+
     /// Initialize the engine
     Initialize {
         /// Configuration parameters
@@ -29,6 +54,25 @@ pub enum EngineRequest {
         sample_rate: u32,
         /// Whether this is the final chunk
         is_final: bool,
+    },
+
+    /// Direct speech-to-text translation (e.g., PT-BR audio -> English text)
+    ProcessSpeechTranslation {
+        /// Request ID for correlation
+        request_id: u64,
+        /// Audio samples (f32, mono, 16kHz typically)
+        audio: Vec<f32>,
+        /// Sample rate in Hz
+        sample_rate: u32,
+        /// Source language code (e.g., "pt-BR")
+        source_lang: String,
+        /// Target language code (e.g., "en-US")
+        target_lang: String,
+        /// Whether this is the final chunk of the utterance
+        is_final: bool,
+        /// Optional stream/utterance timing metadata
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        meta: Option<AudioFrameMeta>,
     },
 
     /// Process text for translation
@@ -91,6 +135,18 @@ pub enum EngineRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EngineResponse {
+    /// Handshake acknowledgement with worker metadata and negotiated limits
+    Welcome {
+        /// Worker protocol version (SemVer)
+        protocol_version: String,
+        /// Advertised engine capabilities and licensing metadata
+        info: EngineInfo,
+        /// Negotiated maximum concurrent in-flight requests
+        max_in_flight: u32,
+        /// Negotiated maximum binary PCM payload size in bytes
+        max_payload_bytes: u32,
+    },
+
     /// Engine initialized successfully
     Initialized {
         /// Engine ID
@@ -106,6 +162,14 @@ pub enum EngineResponse {
         request_id: u64,
         /// Processing result
         result: ProcessingResult<SttOutput>,
+    },
+
+    /// Direct speech-to-text translation result
+    SpeechTranslationResult {
+        /// Correlated request ID
+        request_id: u64,
+        /// Processing result
+        result: ProcessingResult<SpeechTranslationOutput>,
     },
 
     /// Translation result
@@ -250,6 +314,19 @@ pub struct TranslationOutput {
     pub detected_source: Option<String>,
 }
 
+/// Direct speech-to-text translation output.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpeechTranslationOutput {
+    /// Translated text in the target language
+    pub text: String,
+    /// Detected source language
+    pub detected_source: Option<String>,
+    /// Target language code
+    pub target_lang: String,
+    /// Confidence score (0.0 - 1.0)
+    pub confidence: Option<f32>,
+}
+
 /// TTS output.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TtsOutput {
@@ -272,6 +349,64 @@ pub struct S2sOutput {
     pub transcription: Option<String>,
     /// Intermediate translation (if available)
     pub translation: Option<String>,
+}
+
+impl EngineRequest {
+    /// Return the correlation request ID if this message carries one.
+    pub fn request_id(&self) -> Option<u64> {
+        match self {
+            Self::ProcessStt { request_id, .. }
+            | Self::ProcessSpeechTranslation { request_id, .. }
+            | Self::ProcessTranslation { request_id, .. }
+            | Self::ProcessTts { request_id, .. }
+            | Self::ProcessS2s { request_id, .. }
+            | Self::Cancel { request_id } => Some(*request_id),
+            Self::Hello { .. }
+            | Self::Initialize { .. }
+            | Self::Shutdown
+            | Self::Ping { .. }
+            | Self::GetCapabilities => None,
+        }
+    }
+}
+
+impl EngineResponse {
+    /// Return the correlation request ID if this response resolves a specific request.
+    pub fn request_id(&self) -> Option<u64> {
+        match self {
+            Self::SttResult { request_id, .. }
+            | Self::SpeechTranslationResult { request_id, .. }
+            | Self::TranslationResult { request_id, .. }
+            | Self::TtsResult { request_id, .. }
+            | Self::S2sResult { request_id, .. }
+            | Self::Cancelled { request_id } => Some(*request_id),
+            Self::Error { request_id, .. } => *request_id,
+            Self::Welcome { .. }
+            | Self::Initialized { .. }
+            | Self::ShutdownComplete
+            | Self::Pong { .. }
+            | Self::Capabilities { .. } => None,
+        }
+    }
+}
+
+/// Check SemVer compatibility between runtime and worker protocol versions.
+///
+/// For `0.y.z` pre-1.0 versions, `major` (`0`) and `minor` (`y`) must match.
+/// For `>= 1.0.0`, `major` must match.
+pub fn is_version_compatible(local: &str, remote: &str) -> bool {
+    let parse_parts = |v: &str| -> Option<(u32, u32)> {
+        let mut iter = v.trim().split('.');
+        let major = iter.next()?.parse::<u32>().ok()?;
+        let minor = iter.next()?.parse::<u32>().ok()?;
+        Some((major, minor))
+    };
+
+    match (parse_parts(local), parse_parts(remote)) {
+        (Some((0, l_minor)), Some((0, r_minor))) => l_minor == r_minor,
+        (Some((l_major, _)), Some((r_major, _))) if l_major >= 1 => l_major == r_major,
+        _ => false,
+    }
 }
 
 #[cfg(test)]

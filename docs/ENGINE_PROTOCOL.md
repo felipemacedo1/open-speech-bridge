@@ -30,13 +30,27 @@ The protocol is versioned. Engines and runtime negotiate compatible versions.
 - Shared memory for audio data
 
 ### Process Engines
-- Unix domain sockets (Linux)
-- JSON messages over stdio
-- Binary audio data separately
+- **Unix Domain Sockets (UDS)**: Primary transport on Linux (`OSBP` v1 binary framing)
+- Restrictive runtime directory (`0o700`) and socket permissions (`0o600`)
+- Daemon binds listener and passes `--socket <path>` plus `OSB_ENGINE_SOCKET=<path>` (or attaches via `WorkerSpec::connect`)
+
+## Binary Wire Framing (`OSBP` v1)
+
+Every message over a Unix Domain Socket is framed with a 16-byte little-endian binary prefix (`osb_protocol::framing`):
+
+| Offset | Size | Field | Description |
+|--------|------|-------|-------------|
+| `0..4` | 4 B | `magic` | ASCII `"OSBP"` (`0x4F 0x53 0x42 0x50`) |
+| `4..6` | 2 B | `version` | `u16` little-endian (`1`) |
+| `6..8` | 2 B | `flags` | `u16` bitflags (`HAS_PCM_PAYLOAD = 0x01`, `SPEECH_START = 0x02`, `SPEECH_END = 0x04`, `END_OF_UTTERANCE = 0x08`, `END_OF_STREAM = 0x10`, `DISCONTINUITY = 0x20`) |
+| `8..12` | 4 B | `header_len` | `u32` byte length of UTF-8 JSON control header (default max 64 KiB) |
+| `12..16` | 4 B | `payload_len` | `u32` byte length of raw `f32le` PCM payload (default max 4 MiB, multiple of 4) |
+
+When `HAS_PCM_PAYLOAD` is set on audio-carrying messages (`process_stt`, `process_speech_translation`, `process_s2s`, `tts_result`, `s2s_result`), the JSON control header encodes `"audio": []` and the raw IEEE-754 `f32` little-endian samples follow immediately in the binary payload section.
 
 ## Message Format
 
-All messages are JSON with a `type` field:
+Control headers are UTF-8 JSON objects with a `type` discriminator:
 
 ```json
 {
@@ -46,6 +60,43 @@ All messages are JSON with a `type` field:
 ```
 
 ## Lifecycle Messages
+
+### Handshake (`Hello` / `Welcome`)
+
+Runtime → Engine:
+```json
+{
+  "type": "hello",
+  "protocol_version": "0.1.0",
+  "max_in_flight": 4,
+  "max_payload_bytes": 4194304
+}
+```
+
+Engine → Runtime:
+```json
+{
+  "type": "welcome",
+  "protocol_version": "0.1.0",
+  "info": {
+    "id": "mock",
+    "name": "Mock Engine",
+    "version": "0.1.0",
+    "engine_type": "mock",
+    "capabilities": {
+      "capabilities": ["stt", "speech_translation", "tts", "speech_to_speech", "cpu_only"],
+      "language_pairs": [{"source": "pt-BR", "target": "en-US"}],
+      "stt_languages": ["pt-BR", "en-US"],
+      "tts_languages": ["en-US", "pt-BR"]
+    },
+    "license": "Apache-2.0",
+    "weights_license": "Apache-2.0",
+    "commercial_use": true
+  },
+  "max_in_flight": 4,
+  "max_payload_bytes": 4194304
+}
+```
 
 ### Initialize
 
@@ -178,6 +229,48 @@ Engine → Runtime (final result):
       ]
     },
     "processing_ms": 150
+  }
+}
+```
+
+### Direct Speech Translation (Audio → Translated Text)
+
+Used by engines that translate speech directly to target-language text without a separate MT hop (for example, Whisper `translate` task for PT-BR audio → English text).
+
+Runtime → Engine (JSON control header; PCM samples carried in binary `f32le` payload):
+```json
+{
+  "type": "process_speech_translation",
+  "request_id": 10,
+  "audio": [],
+  "sample_rate": 16000,
+  "source_lang": "pt-BR",
+  "target_lang": "en-US",
+  "is_final": true,
+  "meta": {
+    "session_id": 1,
+    "utterance_id": 1,
+    "chunk_id": 0,
+    "timestamp_us": 5000,
+    "channels": 1
+  }
+}
+```
+
+Engine → Runtime:
+```json
+{
+  "type": "speech_translation_result",
+  "request_id": 10,
+  "result": {
+    "status": "success",
+    "data": {
+      "text": "Hello world",
+      "detected_source": "pt-BR",
+      "target_lang": "en-US",
+      "confidence": 0.93
+    },
+    "processing_ms": 180
   }
 }
 ```
@@ -349,12 +442,12 @@ import sys
 class MySTTEngine:
     def __init__(self):
         self.model = None
-    
+
     def handle_message(self, msg):
         if msg["type"] == "initialize":
             self.model = load_model(msg["config"]["model_path"])
             return {"type": "initialized", "engine_id": "my-stt"}
-        
+
         elif msg["type"] == "get_capabilities":
             return {
                 "type": "capabilities",
@@ -366,7 +459,7 @@ class MySTTEngine:
                     "stt_languages": ["en", "pt"]
                 }
             }
-        
+
         elif msg["type"] == "process_stt":
             text = self.model.transcribe(msg["audio"])
             return {

@@ -48,6 +48,10 @@ pub enum Capability {
     Vad,
 
     // Translation
+    /// Direct speech-to-text translation (e.g., Whisper `translate` task)
+    SpeechTranslation,
+    /// Streaming direct speech-to-text translation
+    StreamingSpeechTranslation,
     /// Text translation (batch mode)
     TextTranslation,
     /// Streaming text translation
@@ -188,6 +192,12 @@ impl CapabilitySet {
     /// Check if the engine can perform streaming STT.
     pub fn can_stream_stt(&self) -> bool {
         self.has(&Capability::StreamingStt)
+    }
+
+    /// Check if the engine can perform direct speech-to-text translation.
+    pub fn can_translate_speech(&self) -> bool {
+        self.has(&Capability::SpeechTranslation)
+            || self.has(&Capability::StreamingSpeechTranslation)
     }
 
     /// Check if the engine can perform streaming translation.
