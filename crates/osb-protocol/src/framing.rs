@@ -159,15 +159,17 @@ pub enum FramingError {
 }
 
 #[derive(Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type")]
 enum BorrowedAudioRequestHeader<'a> {
-    ProcessStt {
+    #[serde(rename = "process_stt")]
+    Stt {
         request_id: u64,
         audio: &'static [f32],
         sample_rate: u32,
         is_final: bool,
     },
-    ProcessSpeechTranslation {
+    #[serde(rename = "process_speech_translation")]
+    SpeechTranslation {
         request_id: u64,
         audio: &'static [f32],
         sample_rate: u32,
@@ -177,7 +179,8 @@ enum BorrowedAudioRequestHeader<'a> {
         #[serde(skip_serializing_if = "Option::is_none")]
         meta: &'a Option<AudioFrameMeta>,
     },
-    ProcessS2s {
+    #[serde(rename = "process_s2s")]
+    S2s {
         request_id: u64,
         audio: &'static [f32],
         sample_rate: u32,
@@ -363,7 +366,7 @@ pub fn encode_request_frame(
             sample_rate,
             is_final,
         } => {
-            let hdr = BorrowedAudioRequestHeader::ProcessStt {
+            let hdr = BorrowedAudioRequestHeader::Stt {
                 request_id: *request_id,
                 audio: &[],
                 sample_rate: *sample_rate,
@@ -386,7 +389,7 @@ pub fn encode_request_frame(
             is_final,
             meta,
         } => {
-            let hdr = BorrowedAudioRequestHeader::ProcessSpeechTranslation {
+            let hdr = BorrowedAudioRequestHeader::SpeechTranslation {
                 request_id: *request_id,
                 audio: &[],
                 sample_rate: *sample_rate,
@@ -411,7 +414,7 @@ pub fn encode_request_frame(
             target_lang,
             is_final,
         } => {
-            let hdr = BorrowedAudioRequestHeader::ProcessS2s {
+            let hdr = BorrowedAudioRequestHeader::S2s {
                 request_id: *request_id,
                 audio: &[],
                 sample_rate: *sample_rate,

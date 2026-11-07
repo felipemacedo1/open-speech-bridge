@@ -487,13 +487,11 @@ pub async fn listen_and_serve_uds(
     engine: MockEngine,
     limits: FrameLimits,
 ) -> Result<(), FramingError> {
-    if socket_path.exists() {
-        let _ = std::fs::remove_file(socket_path);
-    }
+    let _ = tokio::fs::remove_file(socket_path).await;
     let listener = tokio::net::UnixListener::bind(socket_path)?;
     let (stream, _) = listener.accept().await?;
     let res = serve_stream(stream, engine, limits).await;
-    let _ = std::fs::remove_file(socket_path);
+    let _ = tokio::fs::remove_file(socket_path).await;
     res
 }
 

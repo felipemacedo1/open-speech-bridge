@@ -71,6 +71,17 @@ _EN_TO_PT_WORDS: dict[str, str] = {
 _PT_TO_EN_WORDS: dict[str, str] = {v: k for k, v in _EN_TO_PT_WORDS.items()}
 
 
+def _replace_words_with_map(text: str, lexicon: dict[str, str]) -> str:
+    def _swap(match: re.Match[str]) -> str:
+        word = match.group(0)
+        replacement = lexicon.get(word.lower())
+        if not replacement:
+            return word
+        return replacement.capitalize() if word[0].isupper() else replacement
+
+    return re.sub(r"[A-Za-zÀ-ÿ']+", _swap, text)
+
+
 def _lexical_translate(text: str, source_lang: str, target_lang: str) -> str:
     src = source_lang.strip().lower()
     dst = target_lang.strip().lower()
@@ -84,27 +95,11 @@ def _lexical_translate(text: str, source_lang: str, target_lang: str) -> str:
             lowered = re.sub(
                 rf"\b{re.escape(en_phrase)}\b", pt_phrase, lowered, flags=re.IGNORECASE
             )
-
-        def _swap_en(match: re.Match[str]) -> str:
-            w = match.group(0)
-            rep = _EN_TO_PT_WORDS.get(w.lower())
-            if not rep:
-                return w
-            return rep.capitalize() if w[0].isupper() else rep
-
-        translated = re.sub(r"[A-Za-zÀ-ÿ']+", _swap_en, lowered)
+        translated = _replace_words_with_map(lowered, _EN_TO_PT_WORDS)
         return translated[0].upper() + translated[1:] if translated else ""
 
     if src.startswith("pt") and dst.startswith("en"):
-
-        def _swap_pt(match: re.Match[str]) -> str:
-            w = match.group(0)
-            rep = _PT_TO_EN_WORDS.get(w.lower())
-            if not rep:
-                return w
-            return rep.capitalize() if w[0].isupper() else rep
-
-        return re.sub(r"[A-Za-zÀ-ÿ']+", _swap_pt, result)
+        return _replace_words_with_map(result, _PT_TO_EN_WORDS)
 
     return result
 

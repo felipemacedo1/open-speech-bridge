@@ -380,7 +380,7 @@ async fn spawn_and_accept_uds(
             format!("failed to bind UDS {}: {err}", socket_path.display()),
         ))
     })?;
-    let _ = std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600));
+    let _ = tokio::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600)).await;
 
     let mut cmd = Command::new(program);
     cmd.args(args);
@@ -394,13 +394,16 @@ async fn spawn_and_accept_uds(
         .stderr(Stdio::null())
         .kill_on_drop(true);
 
-    let mut child = cmd.spawn().map_err(|err| {
-        let _ = std::fs::remove_file(&socket_path);
-        Error::Engine(EngineError::start_failed(
-            engine_id.as_str(),
-            format!("failed to spawn {}: {err}", program.display()),
-        ))
-    })?;
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(err) => {
+            let _ = tokio::fs::remove_file(&socket_path).await;
+            return Err(Error::Engine(EngineError::start_failed(
+                engine_id.as_str(),
+                format!("failed to spawn {}: {err}", program.display()),
+            )));
+        }
+    };
 
     let accept_outcome = tokio::time::timeout(startup_timeout, async {
         tokio::select! {
@@ -420,7 +423,7 @@ async fn spawn_and_accept_uds(
             )))
         }
         Ok(Err(wait_res)) => {
-            let _ = std::fs::remove_file(&socket_path);
+            let _ = tokio::fs::remove_file(&socket_path).await;
             let detail = match wait_res {
                 Ok(status) => format!("worker exited before UDS connect ({status})"),
                 Err(io_err) => format!("worker wait failed ({io_err})"),
@@ -477,6 +480,6 @@ async fn cleanup_failed_start(child: &mut Option<Child>, socket_path: Option<&Pa
         let _ = c.wait().await;
     }
     if let Some(p) = socket_path {
-        let _ = std::fs::remove_file(p);
+        let _ = tokio::fs::remove_file(p).await;
     }
 }

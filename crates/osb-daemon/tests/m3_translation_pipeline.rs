@@ -39,9 +39,10 @@ impl EngineHandler for MockInProcess {
 #[tokio::test]
 async fn test_m3_pipeline_with_python_sdk_uds_workers() {
     // Verify python3 is present in test environment
-    if std::process::Command::new("python3")
+    if tokio::process::Command::new("python3")
         .arg("--version")
         .output()
+        .await
         .is_err()
     {
         return;
