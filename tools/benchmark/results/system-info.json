@@ -1,0 +1,33 @@
+{
+  "architecture": "x86_64",
+  "benchmark_policy": "CPU only; no CUDA, Vulkan, OpenVINO, Metal or ROCm",
+  "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
+  "compiler": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0",
+  "cpu_model": "11th Gen Intel(R) Core(TM) i5-1135G7 @ 2.40GHz",
+  "disk_free_bytes": 134167195648,
+  "distribution": "Ubuntu 24.04.5 LTS noble",
+  "gpu": "00:02.0 VGA compatible controller: Intel Corporation TigerLake-LP GT2 [Iris Xe Graphics] (rev 01)",
+  "kernel": "7.0.0-34-generic",
+  "logical_cores": 8,
+  "os": "Linux-7.0.0-34-generic-x86_64-with-glibc2.39",
+  "physical_cores": 4,
+  "power": {
+    "ac_online": "0",
+    "battery_percent": "16",
+    "battery_status": "Discharging",
+    "cpu_governor": "powersave",
+    "intel_pstate": "active",
+    "turbo_disabled": "0"
+  },
+  "python": "3.12.3",
+  "ram_bytes": 16486727680,
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "simd": {
+    "avx": true,
+    "avx2": true,
+    "avx512f": true,
+    "fma": true,
+    "sse4_1": true,
+    "sse4_2": true
+  }
+}

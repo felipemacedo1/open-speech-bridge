@@ -6,6 +6,7 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 mod commands;
+pub mod wav;
 
 /// OpenSpeechBridge - Local-first real-time speech translation
 #[derive(Parser)]
@@ -50,6 +51,9 @@ enum Commands {
         duration: u64,
     },
 
+    /// Translate a WAV file locally through the speech-translation pipeline
+    Translate(Box<commands::translate::TranslateArgs>),
+
     /// Start the translation daemon
     Run {
         /// Configuration file path
@@ -58,6 +62,9 @@ enum Commands {
         /// Run in foreground (don't daemonize)
         #[arg(long)]
         foreground: bool,
+        /// Optional duration in seconds before automatic graceful shutdown (0 = until Ctrl+C / SIGTERM)
+        #[arg(short, long, default_value_t = 0)]
+        duration: u64,
     },
 
     /// Show version and build information
@@ -74,15 +81,15 @@ enum Commands {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    // Set up logging
+    // Emit structured logs to stderr so `--format json` stdout remains clean JSON.
     let filter = if cli.verbose {
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"))
     } else {
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"))
     };
 
     tracing_subscriber::registry()
-        .with(fmt::layer())
+        .with(fmt::layer().with_writer(std::io::stderr))
         .with(filter)
         .init();
 
@@ -94,9 +101,14 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Doctor => commands::doctor::run(json_output).await,
         Commands::Loopback { input, duration } => {
-            commands::loopback::run(input, duration, json_output).await
+            commands::loopback::run(input, duration, json_output, cli.verbose).await
         }
-        Commands::Run { config, foreground } => commands::run::run(config, foreground).await,
+        Commands::Translate(args) => commands::translate::run(*args, json_output).await,
+        Commands::Run {
+            config,
+            foreground,
+            duration,
+        } => commands::run::run(config, foreground, duration).await,
         Commands::Version => commands::version::run(json_output),
         Commands::Engines => commands::engines::run(json_output).await,
         Commands::Status => commands::status::run(json_output).await,

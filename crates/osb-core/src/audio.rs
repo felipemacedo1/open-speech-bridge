@@ -21,6 +21,8 @@ impl SampleRate {
     pub const SPEECH_16K: Self = Self(16000);
     /// 22.05 kHz - Common TTS output rate
     pub const TTS_22K: Self = Self(22050);
+    /// 24 kHz - Neural TTS output rate (e.g., Kokoro)
+    pub const TTS_24K: Self = Self(24000);
     /// 44.1 kHz - CD quality
     pub const CD_44K: Self = Self(44100);
     /// 48 kHz - Professional audio / PipeWire default

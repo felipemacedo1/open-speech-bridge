@@ -6,4 +6,5 @@ pub mod engines;
 pub mod loopback;
 pub mod run;
 pub mod status;
+pub mod translate;
 pub mod version;

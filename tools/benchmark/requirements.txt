@@ -1,0 +1,9 @@
+# Isolated M2 benchmark environment. These packages are not Rust-core dependencies.
+faster-whisper==1.2.1
+ctranslate2==4.8.2
+kokoro==0.9.4
+transformers==4.48.3
+soundfile==0.13.1
+psutil==7.1.0
+pyarrow==21.0.0
+en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl

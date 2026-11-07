@@ -34,7 +34,7 @@
 
 use super::common::{
     build_audio_format_pod, bytes_to_f32_samples, f32_samples_to_bytes, setup_stop_timer,
-    RT_BATCH_SIZE,
+    SignalMetrics, SignalMetricsSnapshot, RT_BATCH_SIZE,
 };
 use super::context::PipeWireContext;
 use crate::error::{PipeWireError, Result};
@@ -57,21 +57,68 @@ pub struct VirtualMicMetricsSnapshot {
     pub callbacks: u64,
     pub frames_requested: u64,
     pub frames_consumed: u64,
+    /// C: signal popped from the virtual microphone ring buffer.
+    pub ring_output: SignalMetricsSnapshot,
+    /// D: signal immediately before conversion into the SPA output buffer.
+    pub output_before_copy: SignalMetricsSnapshot,
+    /// D: signal decoded back from the SPA output buffer after the copy.
+    pub output_after_copy: SignalMetricsSnapshot,
+    pub buffer: VirtualMicBufferSnapshot,
+}
+
+/// Most recently observed SPA buffer geometry for the virtual microphone.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct VirtualMicBufferSnapshot {
+    pub initial_offset: u64,
+    pub initial_size: u64,
+    pub maxsize: u64,
+    pub requested_frames: u64,
+    pub published_offset: u64,
+    pub published_size: u64,
+    pub published_stride: u64,
 }
 
 #[derive(Debug, Default)]
 struct VirtualMicMetrics {
+    signal_metrics_enabled: AtomicBool,
     callbacks: AtomicU64,
     frames_requested: AtomicU64,
     frames_consumed: AtomicU64,
+    ring_output: SignalMetrics,
+    output_before_copy: SignalMetrics,
+    output_after_copy: SignalMetrics,
+    initial_offset: AtomicU64,
+    initial_size: AtomicU64,
+    maxsize: AtomicU64,
+    requested_frames: AtomicU64,
+    published_offset: AtomicU64,
+    published_size: AtomicU64,
+    published_stride: AtomicU64,
 }
 
 impl VirtualMicMetrics {
+    #[inline]
+    fn signal_metrics_enabled(&self) -> bool {
+        self.signal_metrics_enabled.load(Ordering::Relaxed)
+    }
+
     fn snapshot(&self) -> VirtualMicMetricsSnapshot {
         VirtualMicMetricsSnapshot {
             callbacks: self.callbacks.load(Ordering::Relaxed),
             frames_requested: self.frames_requested.load(Ordering::Relaxed),
             frames_consumed: self.frames_consumed.load(Ordering::Relaxed),
+            ring_output: self.ring_output.snapshot(),
+            output_before_copy: self.output_before_copy.snapshot(),
+            output_after_copy: self.output_after_copy.snapshot(),
+            buffer: VirtualMicBufferSnapshot {
+                initial_offset: self.initial_offset.load(Ordering::Relaxed),
+                initial_size: self.initial_size.load(Ordering::Relaxed),
+                maxsize: self.maxsize.load(Ordering::Relaxed),
+                requested_frames: self.requested_frames.load(Ordering::Relaxed),
+                published_offset: self.published_offset.load(Ordering::Relaxed),
+                published_size: self.published_size.load(Ordering::Relaxed),
+                published_stride: self.published_stride.load(Ordering::Relaxed),
+            },
         }
     }
 }
@@ -228,9 +275,20 @@ impl VirtualMicrophone {
         self.metrics.snapshot()
     }
 
+    /// Enable or disable aggregate signal diagnostics in the audio callback.
+    ///
+    /// Disabled by default so normal operation does not scan every sample for
+    /// RMS and peak values. Enable this before `start()` for verbose output.
+    pub fn set_signal_metrics_enabled(&self, enabled: bool) {
+        self.metrics
+            .signal_metrics_enabled
+            .store(enabled, Ordering::Relaxed);
+    }
+
     /// Start the virtual microphone.
     ///
-    /// This creates a PipeWire node with `media.class = "Audio/Source/Virtual"`
+    /// This creates a PipeWire node with `media.class = "Audio/Source"` and
+    /// `node.virtual = true`
     /// and registers it with the PipeWire graph. The device will appear in
     /// application device lists (Discord, Zoom, etc.) as an available microphone.
     ///
@@ -239,7 +297,8 @@ impl VirtualMicrophone {
     ///
     /// # PipeWire Node Properties
     ///
-    /// - `media.class = "Audio/Source/Virtual"` - Identifies as virtual audio source
+    /// - `media.class = "Audio/Source"` - Identifies as an audio capture device
+    /// - `node.virtual = true` - Marks the source as virtual
     /// - `node.name = "openspeechbridge-virtual-mic"` - Internal identifier
     /// - `node.description = "<user-provided name>"` - Display name in apps
     /// - `audio.rate = 48000` - Sample rate
@@ -384,10 +443,91 @@ struct VirtualMicUserData {
     metrics: Arc<VirtualMicMetrics>,
 }
 
+// A source is a PipeWire output stream: the client fills dequeued buffers and
+// queues them for downstream capture clients.
+const VIRTUAL_MIC_STREAM_DIRECTION: spa::utils::Direction = spa::utils::Direction::Output;
+
+#[derive(Debug, Clone, Copy, Default)]
+struct OutputRenderStats {
+    frames_requested: u64,
+    frames_consumed: u64,
+    bytes_written: usize,
+}
+
+/// Render interleaved F32LE audio into an output buffer owned by PipeWire.
+///
+/// The output buffer capacity (`spa_data.maxsize`) is the writable extent for
+/// an output stream. The incoming chunk offset/size describes valid input data
+/// and must not be used to size an output write.
+fn render_virtual_mic_output(
+    consumer: &mut AudioRingConsumer,
+    output: &mut [u8],
+    channels: usize,
+    metrics: &VirtualMicMetrics,
+) -> OutputRenderStats {
+    if channels == 0 {
+        return OutputRenderStats::default();
+    }
+
+    let frame_bytes = channels * std::mem::size_of::<f32>();
+    let writable_bytes = (output.len() / frame_bytes) * frame_bytes;
+    let mut sample_buf = [0.0f32; RT_BATCH_SIZE];
+    let mut byte_offset = 0usize;
+    let mut frames_consumed = 0u64;
+    let collect_signal_metrics = metrics.signal_metrics_enabled();
+
+    while byte_offset < writable_bytes {
+        let remaining_samples = (writable_bytes - byte_offset) / 4;
+        let batch_capacity = remaining_samples.min(RT_BATCH_SIZE);
+        let batch_samples = (batch_capacity / channels) * channels;
+        if batch_samples == 0 {
+            break;
+        }
+
+        let read = consumer.pop_or_silence(&mut sample_buf[..batch_samples]);
+        if collect_signal_metrics {
+            metrics.ring_output.record(&sample_buf[..read]);
+            metrics
+                .output_before_copy
+                .record(&sample_buf[..batch_samples]);
+        }
+
+        let written = f32_samples_to_bytes(
+            &sample_buf[..batch_samples],
+            &mut output[byte_offset..writable_bytes],
+        );
+        if collect_signal_metrics {
+            metrics
+                .output_after_copy
+                .record_f32le_bytes(&output[byte_offset..byte_offset + written]);
+        }
+
+        frames_consumed += (read / channels) as u64;
+        byte_offset += written;
+    }
+
+    OutputRenderStats {
+        frames_requested: (byte_offset / frame_bytes) as u64,
+        frames_consumed,
+        bytes_written: byte_offset,
+    }
+}
+
+#[inline]
+fn requested_output_bytes(maxsize: usize, requested_frames: usize, frame_stride: usize) -> usize {
+    let requested_bytes = requested_frames.saturating_mul(frame_stride);
+    if requested_bytes == 0 {
+        maxsize
+    } else {
+        maxsize.min(requested_bytes)
+    }
+}
+
 /// Run the PipeWire virtual microphone loop in a dedicated thread.
 ///
 /// This function owns the `AudioRingConsumer` and provides audio to PipeWire.
-/// It creates a real PipeWire stream with `media.class = "Audio/Source/Virtual"`
+/// It creates a real PipeWire stream with `media.class = "Audio/Source"` and
+/// `node.virtual = true`
 /// that appears as a microphone in applications.
 ///
 /// # PipeWire Integration
@@ -396,7 +536,7 @@ struct VirtualMicUserData {
 /// 2. Creates a `Context` and connects to PipeWire daemon
 /// 3. Creates a `Stream` with virtual audio source properties
 /// 4. Registers a real-time safe `process` callback
-/// 5. Connects with `Direction::Input` so the stream provides source audio
+/// 5. Connects with `Direction::Output` so the client publishes source audio
 /// 6. Runs the main loop until `is_running` is set to false
 ///
 /// # Real-time Safety
@@ -441,14 +581,20 @@ fn run_virtual_mic_loop(
     info!(name = %name, "connected to PipeWire daemon for virtual mic");
 
     // Build stream properties for virtual audio source
-    // media.class = "Audio/Source/Virtual" makes this appear as a microphone
+    // Audio/Source plus node.virtual makes this appear as a virtual microphone.
     let stream_props = properties! {
         *pw::keys::MEDIA_TYPE => "Audio",
-        *pw::keys::MEDIA_CATEGORY => "Capture",  // From app's perspective, this is a capture device
+        // The stream produces audio. Applications consume the resulting
+        // Audio/Source node as a capture device.
+        *pw::keys::MEDIA_CATEGORY => "Playback",
         *pw::keys::MEDIA_ROLE => "Communication",
-        *pw::keys::MEDIA_CLASS => "Audio/Source/Virtual",
+        *pw::keys::MEDIA_CLASS => "Audio/Source",
+        *pw::keys::NODE_VIRTUAL => "true",
         *pw::keys::NODE_NAME => "openspeechbridge-virtual-mic",
         *pw::keys::NODE_DESCRIPTION => name,
+        "priority.session" => "0",
+        "priority.driver" => "0",
+        "state.restore-props" => "false",
     };
 
     // Create the virtual mic stream
@@ -494,56 +640,62 @@ fn run_virtual_mic_loop(
 
             if let Some(mut buffer) = stream.dequeue_buffer() {
                 user_data.metrics.callbacks.fetch_add(1, Ordering::Relaxed);
+                let requested_frames = buffer.requested() as usize;
                 let datas = buffer.datas_mut();
                 if let Some(data) = datas.first_mut() {
-                    let offset = data.chunk().offset() as usize;
-                    let size = data.chunk().size() as usize;
-                    if let Some(slice) = data.data() {
-                        if offset + size > slice.len() {
-                            return;
-                        }
-                        let output = &mut slice[offset..offset + size];
-                        let num_samples = output.len() / 4;
-
-                        // Process in batches using stack buffer (no allocation)
-                        let mut sample_buf = [0.0f32; RT_BATCH_SIZE];
-                        let mut byte_offset = 0usize;
-                        let mut frames_requested = 0u64;
-                        let mut frames_consumed = 0u64;
-
-                        while byte_offset + 4 <= output.len() {
-                            let batch_samples =
-                                ((output.len() - byte_offset) / 4).min(RT_BATCH_SIZE);
-                            frames_requested += (batch_samples / channels as usize) as u64;
-
-                            // Read from ring buffer (lock-free, real-time safe)
-                            let read = user_data
-                                .consumer
-                                .pop_or_silence(&mut sample_buf[..batch_samples]);
-                            frames_consumed += (read / channels as usize) as u64;
-
-                            // Convert f32 samples to F32LE bytes using common helper
-                            let written = f32_samples_to_bytes(
-                                &sample_buf[..batch_samples],
-                                &mut output[byte_offset..],
-                            );
-
-                            byte_offset += written;
-                        }
+                    let initial_offset = data.chunk().offset() as u64;
+                    let initial_size = data.chunk().size() as u64;
+                    if let Some(output) = data.data() {
+                        let maxsize = output.len() as u64;
+                        let frame_stride = channels as usize * 4;
+                        let output_bytes =
+                            requested_output_bytes(output.len(), requested_frames, frame_stride);
+                        let render = render_virtual_mic_output(
+                            &mut user_data.consumer,
+                            &mut output[..output_bytes],
+                            channels as usize,
+                            &user_data.metrics,
+                        );
                         user_data
                             .metrics
                             .frames_requested
-                            .fetch_add(frames_requested, Ordering::Relaxed);
+                            .fetch_add(render.frames_requested, Ordering::Relaxed);
                         user_data
                             .metrics
                             .frames_consumed
-                            .fetch_add(frames_consumed, Ordering::Relaxed);
+                            .fetch_add(render.frames_consumed, Ordering::Relaxed);
 
-                        // Update chunk metadata to indicate how much data we wrote
+                        let frame_stride = channels as u64 * 4;
                         let chunk = data.chunk_mut();
                         *chunk.offset_mut() = 0;
-                        *chunk.stride_mut() = 4;
-                        *chunk.size_mut() = (num_samples * 4) as u32;
+                        *chunk.stride_mut() = frame_stride as i32;
+                        *chunk.size_mut() = render.bytes_written as u32;
+
+                        user_data
+                            .metrics
+                            .initial_offset
+                            .store(initial_offset, Ordering::Relaxed);
+                        user_data
+                            .metrics
+                            .initial_size
+                            .store(initial_size, Ordering::Relaxed);
+                        user_data.metrics.maxsize.store(maxsize, Ordering::Relaxed);
+                        user_data
+                            .metrics
+                            .requested_frames
+                            .store(requested_frames as u64, Ordering::Relaxed);
+                        user_data
+                            .metrics
+                            .published_offset
+                            .store(0, Ordering::Relaxed);
+                        user_data
+                            .metrics
+                            .published_size
+                            .store(render.bytes_written as u64, Ordering::Relaxed);
+                        user_data
+                            .metrics
+                            .published_stride
+                            .store(frame_stride, Ordering::Relaxed);
                     }
                 }
                 // Buffer is automatically queued back when dropped
@@ -559,12 +711,11 @@ fn run_virtual_mic_loop(
     let mut params = [Pod::from_bytes(&values)
         .ok_or_else(|| PipeWireError::Internal("failed to create format pod".to_string()))?];
 
-    // A PipeWire source stream has output ports. In pipewire-rs this is
-    // created by connecting the stream with Direction::Input; Direction::Output
-    // would create input ports and leave the advertised source suspended.
+    // The virtual source publishes buffers to capture clients. PipeWire calls
+    // an Output stream with writable buffers, which we fill and then publish.
     stream
         .connect(
-            spa::utils::Direction::Input,
+            VIRTUAL_MIC_STREAM_DIRECTION,
             None, // No specific target, apps will connect to us
             pw::stream::StreamFlags::AUTOCONNECT
                 | pw::stream::StreamFlags::MAP_BUFFERS
@@ -1030,6 +1181,60 @@ pub const DEFAULT_VIRTUAL_SINK_NAME: &str = "OpenSpeechBridge Virtual Sink";
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_nonzero_output_survives_ring_and_spa_copy(channels: usize) {
+        let frames = 128usize;
+        let (mut producer, mut consumer) = AudioRingBuffer::new(frames as u32, channels as u8);
+        let input: Vec<f32> = (0..frames * channels)
+            .map(|index| if index % 2 == 0 { 0.25 } else { -0.125 })
+            .collect();
+        assert_eq!(producer.push(&input), input.len());
+
+        let metrics = VirtualMicMetrics::default();
+        metrics
+            .signal_metrics_enabled
+            .store(true, Ordering::Relaxed);
+        let mut output = vec![0u8; input.len() * std::mem::size_of::<f32>()];
+        let rendered = render_virtual_mic_output(&mut consumer, &mut output, channels, &metrics);
+
+        assert_eq!(rendered.frames_requested, frames as u64);
+        assert_eq!(rendered.frames_consumed, frames as u64);
+        assert_eq!(rendered.bytes_written, output.len());
+
+        let mut decoded = vec![0.0f32; input.len()];
+        assert_eq!(bytes_to_f32_samples(&output, &mut decoded), input.len());
+        assert_eq!(decoded, input);
+        assert!(decoded.iter().any(|sample| *sample != 0.0));
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.ring_output.nonzero, input.len() as u64);
+        assert_eq!(snapshot.output_before_copy.nonzero, input.len() as u64);
+        assert_eq!(snapshot.output_after_copy.nonzero, input.len() as u64);
+        assert!(snapshot.ring_output.rms > 0.0);
+        assert!(snapshot.output_after_copy.peak > 0.0);
+    }
+
+    #[test]
+    fn virtual_mic_stream_publishes_pipewire_output() {
+        assert_eq!(VIRTUAL_MIC_STREAM_DIRECTION, spa::utils::Direction::Output);
+    }
+
+    #[test]
+    fn virtual_mic_preserves_nonzero_mono_signal() {
+        assert_nonzero_output_survives_ring_and_spa_copy(1);
+    }
+
+    #[test]
+    fn virtual_mic_preserves_nonzero_stereo_signal() {
+        assert_nonzero_output_survives_ring_and_spa_copy(2);
+    }
+
+    #[test]
+    fn virtual_mic_limits_output_to_requested_frames() {
+        assert_eq!(requested_output_bytes(131_072, 1_024, 8), 8_192);
+        assert_eq!(requested_output_bytes(4_096, 1_024, 8), 4_096);
+        assert_eq!(requested_output_bytes(4_096, 0, 8), 4_096);
+    }
 
     /// Test that VirtualMicrophone can be created with default settings.
     #[test]

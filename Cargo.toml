@@ -7,6 +7,7 @@ members = [
     "crates/osb-protocol",
     "crates/osb-daemon",
     "crates/osb-cli",
+    "engines/mock",
 ]
 
 [workspace.package]
@@ -40,7 +41,7 @@ rtrb = "0.3"     # Real-time safe SPSC ring buffer (Send+Sync)
 rubato = "0.16"  # High-quality resampling
 
 # PipeWire (Linux)
-pipewire = "0.8"
+pipewire = { version = "0.8", features = ["v0_3_49"] }
 libspa = "0.8"
 
 # CLI
@@ -60,6 +61,7 @@ osb-audio = { path = "crates/osb-audio" }
 osb-pipewire = { path = "crates/osb-pipewire" }
 osb-protocol = { path = "crates/osb-protocol" }
 osb-daemon = { path = "crates/osb-daemon" }
+osb-engine-mock = { path = "engines/mock" }
 
 [profile.release]
 lto = "thin"

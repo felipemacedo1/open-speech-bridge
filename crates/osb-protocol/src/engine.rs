@@ -129,9 +129,12 @@ pub struct EngineInfo {
     pub capabilities: CapabilitySet,
     /// Model name/path if applicable
     pub model: Option<String>,
-    /// License of the engine/model
+    /// License of the engine code
     pub license: Option<String>,
-    /// Whether the model allows commercial use
+    /// License of the model weights (tracked separately when different from code)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weights_license: Option<String>,
+    /// Whether the engine and model weights allow commercial use
     pub commercial_use: Option<bool>,
 }
 
@@ -164,6 +167,7 @@ impl EngineInfoBuilder {
                 capabilities: CapabilitySet::new(),
                 model: None,
                 license: None,
+                weights_license: None,
                 commercial_use: None,
             },
         }
@@ -199,9 +203,15 @@ impl EngineInfoBuilder {
         self
     }
 
-    /// Set the license.
+    /// Set the engine code license.
     pub fn license(mut self, license: impl Into<String>) -> Self {
         self.info.license = Some(license.into());
+        self
+    }
+
+    /// Set the model weights license.
+    pub fn weights_license(mut self, license: impl Into<String>) -> Self {
+        self.info.weights_license = Some(license.into());
         self
     }
 

@@ -1,9 +1,14 @@
 //! Runtime orchestration for the daemon.
 
+use crate::engine_supervisor::{EngineSupervisor, RestartPolicy};
+use crate::worker::WorkerSpec;
 use osb_core::config::Config;
-use osb_core::error::Result;
+use osb_core::error::{ConfigError, Error, Result};
+use osb_protocol::engine::{EngineInfo, EngineType};
+use std::path::Path;
 use std::sync::Arc;
-use tokio::sync::{broadcast, RwLock};
+use std::time::Duration;
+use tokio::sync::{broadcast, Mutex, RwLock};
 use tracing::{info, warn};
 
 /// Runtime state.
@@ -34,6 +39,8 @@ pub struct RuntimeConfig {
     pub enable_virtual_sink: bool,
     /// Virtual microphone name
     pub virtual_mic_name: String,
+    /// Virtual sink name
+    pub virtual_sink_name: String,
 }
 
 impl Default for RuntimeConfig {
@@ -43,6 +50,7 @@ impl Default for RuntimeConfig {
             enable_virtual_mic: true,
             enable_virtual_sink: false,
             virtual_mic_name: "OpenSpeechBridge".to_string(),
+            virtual_sink_name: "OpenSpeechBridge Incoming".to_string(),
         }
     }
 }
@@ -51,19 +59,53 @@ impl Default for RuntimeConfig {
 pub struct Runtime {
     config: RuntimeConfig,
     state: Arc<RwLock<RuntimeState>>,
+    supervisor: Arc<Mutex<EngineSupervisor>>,
     shutdown_tx: broadcast::Sender<()>,
 }
 
 impl Runtime {
-    /// Create a new runtime with the given configuration.
+    /// Create a new runtime with the given configuration, registering any configured UDS workers.
     pub fn new(config: RuntimeConfig) -> Self {
         let (shutdown_tx, _) = broadcast::channel(1);
+        let mut supervisor = EngineSupervisor::new();
+        register_configured_workers(&mut supervisor, &config.config);
 
         Self {
             config,
             state: Arc::new(RwLock::new(RuntimeState::Stopped)),
+            supervisor: Arc::new(Mutex::new(supervisor)),
             shutdown_tx,
         }
+    }
+
+    /// Load a TOML [`Config`] file from disk and construct a [`Runtime`].
+    pub fn from_config_file(path: &Path) -> Result<Self> {
+        if !path.exists() {
+            return Err(Error::Config(ConfigError::FileNotFound {
+                path: path.display().to_string(),
+            }));
+        }
+        let raw = std::fs::read_to_string(path)?;
+        let parsed = Config::from_toml_str(&raw)?;
+        let enable_virtual_mic = parsed.audio.enable_virtual_mic;
+        let enable_virtual_sink = parsed.audio.enable_virtual_sink || parsed.engine.enable_incoming;
+        let virtual_mic_name = if parsed.audio.virtual_mic_name.is_empty() {
+            "OpenSpeechBridge".to_string()
+        } else {
+            parsed.audio.virtual_mic_name.clone()
+        };
+        let virtual_sink_name = if parsed.audio.virtual_sink_name.is_empty() {
+            "OpenSpeechBridge Incoming".to_string()
+        } else {
+            parsed.audio.virtual_sink_name.clone()
+        };
+        Ok(Self::new(RuntimeConfig {
+            config: parsed,
+            enable_virtual_mic,
+            enable_virtual_sink,
+            virtual_mic_name,
+            virtual_sink_name,
+        }))
     }
 
     /// Create a runtime with default configuration.
@@ -71,16 +113,21 @@ impl Runtime {
         Self::new(RuntimeConfig::default())
     }
 
+    /// Access the runtime's [`EngineSupervisor`].
+    pub fn supervisor(&self) -> &Arc<Mutex<EngineSupervisor>> {
+        &self.supervisor
+    }
+
     /// Get the current runtime state.
     pub async fn state(&self) -> RuntimeState {
         *self.state.read().await
     }
 
-    /// Start the runtime.
+    /// Start the runtime and all registered engines.
     pub async fn start(&self) -> Result<()> {
         {
             let mut state = self.state.write().await;
-            if *state != RuntimeState::Stopped {
+            if *state != RuntimeState::Stopped && *state != RuntimeState::Error {
                 warn!("runtime already started");
                 return Ok(());
             }
@@ -89,10 +136,11 @@ impl Runtime {
 
         info!("starting OpenSpeechBridge runtime");
 
-        // Initialize components
-        // 1. Audio manager (capture, playback, virtual devices)
-        // 2. Engine supervisor (load and manage ML engines)
-        // 3. Processing pipeline (connect audio to engines)
+        if let Err(err) = self.supervisor.lock().await.start_all().await {
+            let mut state = self.state.write().await;
+            *state = RuntimeState::Error;
+            return Err(err);
+        }
 
         {
             let mut state = self.state.write().await;
@@ -103,7 +151,7 @@ impl Runtime {
         Ok(())
     }
 
-    /// Stop the runtime.
+    /// Stop the runtime and gracefully shut down all supervised engines.
     pub async fn stop(&self) -> Result<()> {
         {
             let state = self.state.read().await;
@@ -119,13 +167,8 @@ impl Runtime {
 
         info!("shutting down runtime");
 
-        // Signal shutdown to all components
         let _ = self.shutdown_tx.send(());
-
-        // Stop components in reverse order
-        // 1. Processing pipeline
-        // 2. Engine supervisor
-        // 3. Audio manager
+        let _ = self.supervisor.lock().await.stop_all().await;
 
         {
             let mut state = self.state.write().await;
@@ -167,6 +210,52 @@ impl Runtime {
     }
 }
 
+fn register_configured_workers(supervisor: &mut EngineSupervisor, config: &Config) {
+    let startup = Duration::from_millis(config.engine.startup_timeout_ms.max(1_000));
+    let processing = Duration::from_millis(config.engine.processing_timeout_ms.max(1_000));
+
+    for worker_cfg in &config.engine.workers {
+        if worker_cfg.id.is_empty() || worker_cfg.program.is_empty() {
+            continue;
+        }
+        let info = EngineInfo::builder(worker_cfg.id.clone())
+            .name(if worker_cfg.name.is_empty() {
+                worker_cfg.id.clone()
+            } else {
+                worker_cfg.name.clone()
+            })
+            .version("0.1.0")
+            .engine_type(EngineType::External)
+            .build();
+        let program = resolve_worker_program(&worker_cfg.program);
+        let mut spec = WorkerSpec::spawn(program, &worker_cfg.args)
+            .with_startup_timeout(startup)
+            .with_processing_timeout(processing);
+        for (k, v) in &worker_cfg.env {
+            spec = spec.with_env(k, v);
+        }
+        let policy = RestartPolicy {
+            max_restarts: worker_cfg.max_restarts,
+            ..RestartPolicy::default()
+        };
+        supervisor.register_worker(info, spec, policy);
+    }
+}
+
+fn resolve_worker_program(configured: &str) -> String {
+    let path = Path::new(configured);
+    if path.components().count() > 1 && !path.exists() && configured.contains("python") {
+        return "python3".to_string();
+    }
+    if configured == "python3" {
+        let local_venv = Path::new("tools/benchmark/.venv/bin/python");
+        if local_venv.is_file() {
+            return local_venv.display().to_string();
+        }
+    }
+    configured.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,5 +277,33 @@ mod tests {
 
         runtime.stop().await.unwrap();
         assert_eq!(runtime.state().await, RuntimeState::Stopped);
+    }
+
+    #[tokio::test]
+    async fn test_runtime_from_config_file_registers_workers() {
+        let tmp_path =
+            std::env::temp_dir().join(format!("osb-runtime-cfg-test-{}.toml", std::process::id()));
+        let toml = r#"
+[engine]
+source_language = "pt-BR"
+target_language = "en-US"
+speech_translation_engine = "whisper-small"
+tts_engine = "kokoro-tts"
+
+[[engine.workers]]
+id = "whisper-small"
+name = "Faster-Whisper Small"
+program = "python3"
+args = ["worker.py"]
+max_restarts = 2
+"#;
+        std::fs::write(&tmp_path, toml).unwrap();
+
+        let runtime = Runtime::from_config_file(&tmp_path).unwrap();
+        let _ = std::fs::remove_file(&tmp_path);
+
+        assert_eq!(runtime.config().config.engine.source_language, "pt-BR");
+        let sup = runtime.supervisor().lock().await;
+        assert_eq!(sup.list_engines().len(), 1);
     }
 }

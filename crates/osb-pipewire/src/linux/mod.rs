@@ -8,12 +8,13 @@ mod context;
 mod playback;
 mod virtual_device;
 
-pub use capture::{CaptureStream, CaptureStreamBuilder};
+pub use capture::{CaptureSignalMetricsSnapshot, CaptureStream, CaptureStreamBuilder};
+pub use common::SignalMetricsSnapshot;
 pub use context::PipeWireContext;
 pub use playback::{PlaybackStream, PlaybackStreamBuilder};
 pub use virtual_device::{
-    VirtualMicMetricsSnapshot, VirtualMicrophone, VirtualSink, DEFAULT_VIRTUAL_MIC_NAME,
-    DEFAULT_VIRTUAL_SINK_NAME,
+    VirtualMicBufferSnapshot, VirtualMicMetricsSnapshot, VirtualMicrophone, VirtualSink,
+    DEFAULT_VIRTUAL_MIC_NAME, DEFAULT_VIRTUAL_SINK_NAME,
 };
 
 use std::process::Command;

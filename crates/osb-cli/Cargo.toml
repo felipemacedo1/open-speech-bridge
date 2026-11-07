@@ -17,6 +17,7 @@ osb-audio.workspace = true
 osb-daemon.workspace = true
 osb-pipewire.workspace = true
 osb-protocol.workspace = true
+osb-engine-mock = { path = "../../engines/mock" }
 clap.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
