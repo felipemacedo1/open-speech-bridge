@@ -1,7 +1,8 @@
 //! Benchmarks for audio buffer operations.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use osb_audio::buffer::AudioRingBuffer;
+use std::hint::black_box;
 
 fn ring_buffer_push_pop(c: &mut Criterion) {
     let mut group = c.benchmark_group("ring_buffer");

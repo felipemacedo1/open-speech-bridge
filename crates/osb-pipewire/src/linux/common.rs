@@ -248,7 +248,7 @@ pub fn build_audio_format_pod(format: AudioFormat) -> Result<Vec<u8>> {
 ///
 /// The timer source (must be kept alive while the main loop runs).
 pub fn setup_stop_timer(
-    mainloop: &pw::main_loop::MainLoop,
+    mainloop: &pw::main_loop::MainLoopRc,
     is_running: Arc<AtomicBool>,
     interval_ms: u64,
 ) -> Result<pw::loop_::TimerSource<'_>> {

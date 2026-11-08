@@ -8,7 +8,7 @@ use tracing::{debug, info};
 /// PipeWire context for audio operations.
 pub struct PipeWireContext {
     /// PipeWire main loop (kept alive)
-    _mainloop: pw::main_loop::MainLoop,
+    _mainloop: pw::main_loop::MainLoopRc,
     /// Library version
     version: String,
 }
@@ -24,7 +24,7 @@ impl PipeWireContext {
         info!(version = %version, "initialized PipeWire");
 
         // Create main loop
-        let mainloop = pw::main_loop::MainLoop::new(None)
+        let mainloop = pw::main_loop::MainLoopRc::new(None)
             .map_err(|e| PipeWireError::InitFailed(e.to_string()))?;
 
         Ok(Self {

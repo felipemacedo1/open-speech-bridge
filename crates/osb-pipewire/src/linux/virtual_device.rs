@@ -566,15 +566,15 @@ fn run_virtual_mic_loop(
     );
 
     // Create the PipeWire main loop
-    let mainloop = pw::main_loop::MainLoop::new(None).map_err(|e| {
+    let mainloop = pw::main_loop::MainLoopRc::new(None).map_err(|e| {
         PipeWireError::ConnectionFailed(format!("failed to create main loop: {}", e))
     })?;
 
     // Create context and connect to PipeWire daemon
-    let context = pw::context::Context::new(&mainloop)
+    let context = pw::context::ContextRc::new(&mainloop, None)
         .map_err(|e| PipeWireError::ConnectionFailed(format!("failed to create context: {}", e)))?;
 
-    let core = context.connect(None).map_err(|e| {
+    let core = context.connect_rc(None).map_err(|e| {
         PipeWireError::ConnectionFailed(format!("failed to connect to PipeWire daemon: {}", e))
     })?;
 
@@ -598,9 +598,13 @@ fn run_virtual_mic_loop(
     };
 
     // Create the virtual mic stream
-    let stream = pw::stream::Stream::new(&core, "osb-virtual-mic", stream_props).map_err(|e| {
-        PipeWireError::StreamCreationFailed(format!("failed to create virtual mic stream: {}", e))
-    })?;
+    let stream =
+        pw::stream::StreamRc::new(core.clone(), "osb-virtual-mic", stream_props).map_err(|e| {
+            PipeWireError::StreamCreationFailed(format!(
+                "failed to create virtual mic stream: {}",
+                e
+            ))
+        })?;
 
     // Prepare user data for callbacks
     let user_data = VirtualMicUserData { consumer, metrics };
@@ -1008,15 +1012,15 @@ fn run_virtual_sink_loop(
     );
 
     // Create the PipeWire main loop
-    let mainloop = pw::main_loop::MainLoop::new(None).map_err(|e| {
+    let mainloop = pw::main_loop::MainLoopRc::new(None).map_err(|e| {
         PipeWireError::ConnectionFailed(format!("failed to create main loop: {}", e))
     })?;
 
     // Create context and connect to PipeWire daemon
-    let context = pw::context::Context::new(&mainloop)
+    let context = pw::context::ContextRc::new(&mainloop, None)
         .map_err(|e| PipeWireError::ConnectionFailed(format!("failed to create context: {}", e)))?;
 
-    let core = context.connect(None).map_err(|e| {
+    let core = context.connect_rc(None).map_err(|e| {
         PipeWireError::ConnectionFailed(format!("failed to connect to PipeWire daemon: {}", e))
     })?;
 
@@ -1034,9 +1038,13 @@ fn run_virtual_sink_loop(
     };
 
     // Create the virtual sink stream
-    let stream = pw::stream::Stream::new(&core, "osb-virtual-sink", stream_props).map_err(|e| {
-        PipeWireError::StreamCreationFailed(format!("failed to create virtual sink stream: {}", e))
-    })?;
+    let stream = pw::stream::StreamRc::new(core.clone(), "osb-virtual-sink", stream_props)
+        .map_err(|e| {
+            PipeWireError::StreamCreationFailed(format!(
+                "failed to create virtual sink stream: {}",
+                e
+            ))
+        })?;
 
     // Prepare user data for callbacks
     let user_data = VirtualSinkUserData { producer };
