@@ -157,11 +157,11 @@ fn run_playback_loop(
     pw::init();
 
     let channels = format.channels.channels() as usize;
-    let mainloop = pw::main_loop::MainLoop::new(None)
+    let mainloop = pw::main_loop::MainLoopRc::new(None)
         .map_err(|e| PipeWireError::ConnectionFailed(format!("failed to create main loop: {e}")))?;
-    let context = pw::context::Context::new(&mainloop)
+    let context = pw::context::ContextRc::new(&mainloop, None)
         .map_err(|e| PipeWireError::ConnectionFailed(format!("failed to create context: {e}")))?;
-    let core = context.connect(None).map_err(|e| {
+    let core = context.connect_rc(None).map_err(|e| {
         PipeWireError::ConnectionFailed(format!("failed to connect to PipeWire: {e}"))
     })?;
 
@@ -184,7 +184,7 @@ fn run_playback_loop(
         }
     };
 
-    let stream = pw::stream::Stream::new(&core, "osb-playback", stream_props)
+    let stream = pw::stream::StreamRc::new(core.clone(), "osb-playback", stream_props)
         .map_err(|e| PipeWireError::StreamCreationFailed(format!("playback stream error: {e}")))?;
 
     let mainloop_weak = mainloop.downgrade();

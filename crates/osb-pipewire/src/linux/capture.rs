@@ -529,15 +529,15 @@ fn run_capture_loop(
     );
 
     // Create the PipeWire main loop
-    let mainloop = pw::main_loop::MainLoop::new(None).map_err(|e| {
+    let mainloop = pw::main_loop::MainLoopRc::new(None).map_err(|e| {
         PipeWireError::ConnectionFailed(format!("failed to create main loop: {}", e))
     })?;
 
     // Create context and connect to PipeWire daemon
-    let context = pw::context::Context::new(&mainloop)
+    let context = pw::context::ContextRc::new(&mainloop, None)
         .map_err(|e| PipeWireError::ConnectionFailed(format!("failed to create context: {}", e)))?;
 
-    let core = context.connect(None).map_err(|e| {
+    let core = context.connect_rc(None).map_err(|e| {
         PipeWireError::ConnectionFailed(format!("failed to connect to PipeWire daemon: {}", e))
     })?;
 
@@ -561,9 +561,10 @@ fn run_capture_loop(
     }
 
     // Create the capture stream
-    let stream = pw::stream::Stream::new(&core, "osb-capture", stream_props).map_err(|e| {
-        PipeWireError::StreamCreationFailed(format!("failed to create capture stream: {}", e))
-    })?;
+    let stream =
+        pw::stream::StreamRc::new(core.clone(), "osb-capture", stream_props).map_err(|e| {
+            PipeWireError::StreamCreationFailed(format!("failed to create capture stream: {}", e))
+        })?;
 
     // Prepare user data for callbacks
     let user_data = CaptureUserData {

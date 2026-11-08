@@ -6,12 +6,13 @@
 
 use osb_core::audio::SampleRate;
 use osb_core::error::{AudioError, Result};
-use rubato::{FftFixedInOut, Resampler as RubatoResampler};
+use rubato::audioadapter_buffers::direct::SequentialSliceOfVecs;
+use rubato::{Fft, FixedSync, Resampler as RubatoResampler};
 use tracing::debug;
 
 /// Audio resampler for converting between sample rates.
 pub struct Resampler {
-    inner: FftFixedInOut<f32>,
+    inner: Fft<f32>,
     input_rate: SampleRate,
     output_rate: SampleRate,
     channels: usize,
@@ -36,11 +37,12 @@ impl Resampler {
         channels: usize,
         chunk_size: usize,
     ) -> Result<Self> {
-        let resampler = FftFixedInOut::new(
+        let resampler = Fft::new(
             input_rate.hz() as usize,
             output_rate.hz() as usize,
             chunk_size,
             channels,
+            FixedSync::Both,
         )
         .map_err(|e| AudioError::ResamplingError(e.to_string()))?;
 
@@ -115,10 +117,17 @@ impl Resampler {
     ///
     /// Number of output frames produced.
     pub fn process(&mut self, input: &[Vec<f32>], output: &mut [Vec<f32>]) -> Result<usize> {
+        let to_err = |e: &dyn std::fmt::Display| AudioError::ResamplingError(e.to_string());
+        let in_frames = input.iter().map(Vec::len).min().unwrap_or(0);
+        let out_frames = output.iter().map(Vec::len).min().unwrap_or(0);
+        let in_adapter =
+            SequentialSliceOfVecs::new(input, self.channels, in_frames).map_err(|e| to_err(&e))?;
+        let mut out_adapter = SequentialSliceOfVecs::new_mut(output, self.channels, out_frames)
+            .map_err(|e| to_err(&e))?;
         let (_, frames) = self
             .inner
-            .process_into_buffer(input, output, None)
-            .map_err(|e| AudioError::ResamplingError(e.to_string()))?;
+            .process_into_buffer(&in_adapter, &mut out_adapter, None)
+            .map_err(|e| to_err(&e))?;
         Ok(frames)
     }
 
